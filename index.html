@@ -1,0 +1,2773 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta name="robots" content="noindex,nofollow">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ホテルジュン 料金シミュレーター</title>
+<style>
+  :root{ --maroon:#5a1a1a; --maroon2:#7a2424; --bg:#f4f4f4; --line:#e3e3e3; }
+  *{ box-sizing:border-box; }
+  body{ font-family:"Hiragino Kaku Gothic ProN","Yu Gothic",sans-serif; background:var(--bg); color:#222; margin:0; padding:24px; }
+  .wrap{ max-width:760px; margin:0 auto; }
+  h1{ font-size:20px; color:var(--maroon); text-align:center; margin:8px 0 20px; }
+  .card{ background:#fff; border:1px solid var(--line); border-radius:4px; overflow:hidden; }
+  .row{ display:flex; border-bottom:1px solid var(--line); }
+  .row:last-child{ border-bottom:none; }
+  .row label{ width:170px; min-width:170px; background:var(--maroon); color:#fff; display:flex; align-items:center; padding:16px; font-size:15px; }
+  .row .field{ flex:1; display:flex; align-items:center; padding:10px 16px; }
+  select,input[type=date]{ width:100%; max-width:340px; padding:10px; font-size:16px; border:1px solid #ccc; border-radius:4px; background:#fff; }
+  .btn{ display:block; margin:22px auto; background:var(--maroon); color:#fff; border:none; padding:14px 48px; font-size:17px; border-radius:4px; cursor:pointer; }
+  .btn:hover{ background:var(--maroon2); }
+  .note{ color:#666; font-size:12px; margin-left:8px; }
+  .result{ margin-top:8px; }
+  .price-row label{ background:var(--maroon); }
+  .price{ font-size:30px; color:var(--maroon); font-weight:bold; }
+  .plan{ font-size:16px; }
+  .applied{ font-size:13px; color:#555; padding:10px 16px; background:#faf6f6; border-bottom:1px solid var(--line); }
+  table.bd{ width:100%; border-collapse:collapse; font-size:14px; }
+  table.bd th,table.bd td{ border:1px solid var(--line); padding:8px 10px; text-align:left; }
+  table.bd th{ background:#f0e9e9; }
+  table.bd td.num{ text-align:right; }
+  .mode{ display:inline-block; font-size:11px; color:#fff; background:#9a6a6a; border-radius:3px; padding:1px 6px; margin-left:6px; }
+  .hint{ font-size:12px; color:#777; margin-top:14px; line-height:1.6; }
+  .warn{ font-size:13px; color:#a33; padding:10px 16px; background:#fff3f3; border-bottom:1px solid var(--line); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ホテルジュン 料金シミュレーター</h1>
+
+  <div class="card">
+    <div class="row"><label>入室予定（営業日）</label><div class="field"><input type="date" id="date"></div></div>
+    <div class="row"><label>入室時間</label><div class="field"><select id="time"></select><span class="note">深夜は 24:00=翌0:00 表記</span></div></div>
+    <div class="row"><label>ルームタイプ</label><div class="field"><select id="rank"></select></div></div>
+    <div class="row"><label>滞在時間</label><div class="field"><select id="hours"></select></div></div>
+  </div>
+
+  <button class="btn" id="go">調べる ▼</button>
+
+  <div class="card result" id="result" style="display:none">
+    <div class="applied" id="applied"></div>
+    <div class="warn" id="warn" style="display:none"></div>
+    <div class="row price-row"><label>料金</label><div class="field"><span class="price" id="price"></span></div></div>
+    <div class="row"><label>プラン</label><div class="field"><span class="plan" id="plan"></span></div></div>
+  </div>
+  <div id="bdwrap" style="display:none; margin-top:10px;">
+    <table class="bd" id="bd"><thead><tr><th>項目</th><th>単価</th><th>数量</th><th>小計</th></tr></thead><tbody></tbody></table>
+  </div>
+
+  <div class="hint">
+    ※ 料金は室料のみ（3%奉仕料・人員割増・会員割引は含みません）。<br>
+    ※ 営業日は毎日5:55で切り替わります。日をまたぐ場合は、それぞれの時間帯が属する営業日の区分（平日・土曜など）で計算します（実機と同じ）。<br>
+    ※ 入室時間が24:00以降は「翌日の早朝」を表します（例：26:00＝翌2:00）。
+  </div>
+</div>
+
+<!--
+  エンジン本体は src/ 以下の既存ロジック(既存calculatePrice_Aを完全再現したもの)を
+  そのまま読み込む。ここでは二重実装しない（数値がズレる原因になるため）。
+-->
+<script>
+/* ---- src/jpHolidays.js ---- */
+(function () {
+//////////////////////////////////////////////////////
+// 日本の祝日判定（依存なし・ブラウザ/Node両対応）
+//
+//  - 固定祝日 / ハッピーマンデー / 春分・秋分（近似式・1980〜2099有効）
+//  - 振替休日（祝日が日曜→翌平日）/ 国民の休日（祝日に挟まれた平日）
+//
+//  ※ 実運用前に主要年の祝日を必ず突き合わせて検証すること。
+//    （海の日・スポーツ・山の日は2020/2021の五輪特例は未対応）
+//////////////////////////////////////////////////////
+'use strict';
+
+function ymd(date) { return { y: date.getFullYear(), m: date.getMonth() + 1, d: date.getDate(), dow: date.getDay() }; }
+function nthMonday(year, month, nth) {
+  const first = new Date(year, month - 1, 1).getDay(); // 0=Sun
+  const offset = (1 - first + 7) % 7; // 最初の月曜
+  return 1 + offset + (nth - 1) * 7;
+}
+function shunbun(y) { return Math.floor(20.8431 + 0.242194 * (y - 1980) - Math.floor((y - 1980) / 4)); }
+function shubun(y) { return Math.floor(23.2488 + 0.242194 * (y - 1980) - Math.floor((y - 1980) / 4)); }
+
+// 基本祝日（振替・国民の休日を含まない）
+function primaryHolidayName(date) {
+  const { y, m, d } = ymd(date);
+  if (m === 1 && d === 1) return '元日';
+  if (m === 1 && d === nthMonday(y, 1, 2)) return '成人の日';
+  if (m === 2 && d === 11) return '建国記念の日';
+  if (m === 2 && d === 23 && y >= 2020) return '天皇誕生日';
+  if (m === 3 && d === shunbun(y)) return '春分の日';
+  if (m === 4 && d === 29) return '昭和の日';
+  if (m === 5 && d === 3) return '憲法記念日';
+  if (m === 5 && d === 4) return 'みどりの日';
+  if (m === 5 && d === 5) return 'こどもの日';
+  if (m === 7 && d === nthMonday(y, 7, 3) && y >= 2003) return '海の日';
+  if (m === 8 && d === 11 && y >= 2016) return '山の日';
+  if (m === 9 && d === nthMonday(y, 9, 3)) return '敬老の日';
+  if (m === 9 && d === shubun(y)) return '秋分の日';
+  if (m === 10 && d === nthMonday(y, 10, 2)) return 'スポーツの日';
+  if (m === 11 && d === 3) return '文化の日';
+  if (m === 11 && d === 23) return '勤労感謝の日';
+  return null;
+}
+
+function addDays(date, n) { const x = new Date(date); x.setDate(x.getDate() + n); return x; }
+function isPrimary(date) { return primaryHolidayName(date) !== null; }
+
+// 振替休日: 当日が祝日でなく、遡って連続する祝日の起点が日曜なら振替
+function isSubstitute(date) {
+  if (isPrimary(date)) return false;
+  let p = addDays(date, -1);
+  while (isPrimary(p)) {
+    if (p.getDay() === 0) return true; // 起点が日曜
+    p = addDays(p, -1);
+  }
+  return false;
+}
+
+// 国民の休日: 前後が共に祝日（基本祝日）で、当日が祝日でない日
+function isCitizensHoliday(date) {
+  if (isPrimary(date)) return false;
+  return isPrimary(addDays(date, -1)) && isPrimary(addDays(date, 1));
+}
+
+function isHolidayJP(date) {
+  return isPrimary(date) || isSubstitute(date) || isCitizensHoliday(date);
+}
+
+function holidayName(date) {
+  const n = primaryHolidayName(date);
+  if (n) return n;
+  if (isSubstitute(date)) return '振替休日';
+  if (isCitizensHoliday(date)) return '国民の休日';
+  return null;
+}
+
+const api = { isHolidayJP, holidayName };
+if (typeof module !== 'undefined' && module.exports) module.exports = api;
+if (typeof window !== 'undefined') window.jpHolidays = api;
+
+})();
+
+/* ---- src/dayPattern.js ---- */
+(function () {
+//////////////////////////////////////////////////////
+// 曜日区分(A〜D)の判定（依存: jpHolidays）
+//
+//  区分:
+//   A 平日       : サービス=平日(長) / 宿泊=12時間保証
+//   B 祝前平日   : サービス=平日(長) / 宿泊=10時間保証
+//   C 土・祝前祝日: サービス=土日祝(短) / 宿泊=10時間保証
+//   D 日・祝     : サービス=土日祝(短) / 宿泊=12時間保証
+//
+//  判定:
+//   service = 平日(月〜金 かつ 非祝日) ? 'weekday' : 'holiday'
+//   premium(10h保証) = 土曜 OR 翌日が祝日 OR (当日が祝日 かつ 翌日が休日)
+//////////////////////////////////////////////////////
+'use strict';
+
+const jp = (typeof require !== 'undefined') ? require('./jpHolidays') : window.jpHolidays;
+
+function addDays(date, n) { const x = new Date(date); x.setDate(x.getDate() + n); return x; }
+function isDayOff(date) { const w = date.getDay(); return w === 0 || w === 6 || jp.isHolidayJP(date); }
+
+// その営業日の暦日(date)から区分を返す
+function getDayPattern(date) {
+  const dow = date.getDay();
+  const holiday = jp.isHolidayJP(date);
+  const service = (dow >= 1 && dow <= 5 && !holiday) ? 'weekday' : 'holiday';
+
+  const next = addDays(date, 1);
+  const premium = (dow === 6) || jp.isHolidayJP(next) || (holiday && isDayOff(next));
+  const stayGuarantee = premium ? 10 : 12;
+
+  let code;
+  if (service === 'weekday') code = (stayGuarantee === 12) ? 'A' : 'B';
+  else code = (stayGuarantee === 10) ? 'C' : 'D';
+
+  return { code, service, stayGuarantee };
+}
+
+const api = { getDayPattern };
+if (typeof module !== 'undefined' && module.exports) module.exports = api;
+if (typeof window !== 'undefined') window.dayPattern = api;
+
+})();
+
+/* ---- src/priceEngine.js ---- */
+(function () {
+//////////////////////////////////////////////////////
+// ホテルジュン 料金エンジン（方針X: 既存ロジックをランク非依存に関数化）
+//
+//  - calculatePrice_A の制御フローを一切変えず、料金のみパラメータ化。
+//  - 価格は分岐条件に影響しないため、ランクAでは既存と100%一致（構造的保証）。
+//  - 料金表を差し替えるだけで全9ランクに対応。
+//  - 元ファイル priceSimulator_typeA.js は変更しない（本ファイルは自動生成の出発点）。
+//
+//  ※ midnight_stay は公式に専用料金が無いため stay と同額とする（ランクA: 13800で一致）。
+//////////////////////////////////////////////////////
+
+const RANK_PRICES = {
+  A: { short: 6000, rest: 7800, midnight_rest: 8800, stay: 13800, ext: 1400 },
+  B: { short: 5800, rest: 7200, midnight_rest: 8200, stay: 12800, ext: 1300 },
+  C: { short: 5800, rest: 6980, midnight_rest: 7980, stay: 12800, ext: 1300 },
+  D: { short: 5700, rest: 6980, midnight_rest: 7980, stay: 11800, ext: 1300 },
+  E: { short: 5600, rest: 6980, midnight_rest: 7980, stay: 12800, ext: 1300 },
+  F: { short: 5600, rest: 6700, midnight_rest: 7800, stay: 11200, ext: 1100 },
+  G: { short: 4980, rest: 5980, midnight_rest: 6980, stay: 10800, ext: 1100 },
+  H: { short: 4980, rest: 5980, midnight_rest: 6980, stay: 9980,  ext: 1100 },
+  I: { short: 4980, rest: 5680, midnight_rest: 6800, stay: 8980,  ext: 1000 },
+};
+
+//////////////////////////////////////////////////////
+//部屋タイプA
+
+function calculatePriceByRank(rank, date, hours, checkInTime, checkOutTime, calculateCheckInTime, isSaturdayOrDaysOff, isWeekendOrHoliday){
+    let price = 0;
+    let plan = ' ';
+    // ルームタイプによる料金設定
+    const _r = RANK_PRICES[rank];
+    if(!_r) throw new Error("unknown rank: "+rank);
+    const prices = { short:_r.short, rest:_r.rest, midnight_rest:_r.midnight_rest, midnight_stay:_r.stay, stay:_r.stay };
+
+    // 延長料金設定
+    const extensionFees = { [rank]: _r.ext };
+
+    // 
+    const roomType = rank;
+    
+    // 超過時間を計算
+    const calculateExtensionCharges = (extraHours) => {
+        return Math.ceil(extraHours * 60 / 30) * extensionFees[roomType]; // 30分ごとの延長料金を計算
+    };
+
+    const calculatePreExtensionCharges = (preExtraHours) => {
+        return Math.ceil(preExtraHours * 60 / 30) * extensionFees[roomType]; // 30分ごとの延長料金を計算
+    };
+
+    // **プラン適用ロジック**
+
+
+    // ① ショートプラン (6:00-26:00間、90分以内の利用)
+    if (((checkInTime >= 6 && checkInTime < 24) || (checkInTime >= 0 && checkInTime < 2)) && hours <= 2) {
+        if ((checkInTime >= 6 && checkInTime < 24) || checkInTime === 0) {
+            if(hours <= 1.5){
+                price = prices.short;
+                plan = "ショート";
+                return {price, plan};
+            }
+            else {
+                // 1.5時間を超えた場合は、ショート料金に延長料金を加算
+                let extraHours = 0.5; // 1.5時間を超える分を延長時間として計算
+                price = prices.short + calculateExtensionCharges(extraHours);
+                const extension = extraHours * 60 / 30;
+                plan = "ショート + 延長" + extension + "本";
+                return {price, plan};
+            }
+        }
+        else if ((checkInTime >= 0 && checkInTime < 2) &&checkOutTime < 2.5 * 60) {
+            price = prices.short;
+            plan = "ショート";
+            return {price, plan};
+        }
+        else {
+            price = prices.midnight_rest;
+            plan = "深夜休憩";
+            return {price, plan};
+        }
+    }
+
+    // 土日祝
+    else if(isWeekendOrHoliday(date)) {
+        // 6：00〜9：30にチェックイン
+        if(checkInTime >= 6 && checkInTime < 10){
+            if(checkOutTime <= 16 * 60 && hours <= 10){
+                price = prices.rest;
+                plan = "休憩(サービスタイム1部)";
+                return {price, plan};
+            }
+            else if((checkOutTime <= 18.5 * 60 && checkOutTime > 16 * 60) && hours <= 12.5){
+                // 前延長＋休憩(＋延長)
+                if(checkInTime > 7 && checkOutTime === 18.5 * 60){
+                    const preExtraMinutes = Math.max(10 * 60 - calculateCheckInTime);
+                    const preExtraHours = preExtraMinutes / 60;
+                    const preExtension = preExtraHours * 60 / 30;
+                    price = prices.rest + calculateExtensionCharges(preExtraHours);
+                    plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部)";
+                    return {price, plan};
+                }
+                // 前延長＋休憩(＋延長)
+                else if(checkInTime === 8 && hours >= 10){
+                    const preExtraMinutes = Math.max(10 * 60 - calculateCheckInTime);
+                    const preExtraHours = preExtraMinutes / 60;
+                    const preExtension = preExtraHours * 60 / 30;
+                    price = prices.rest + calculateExtensionCharges(preExtraHours);
+                    plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部)";
+                    return {price, plan};
+                }
+                // 前延長＋休憩(＋延長)
+                else if(checkInTime === 8.5 && hours >= 9){
+                    const preExtraMinutes = Math.max(10 * 60 - calculateCheckInTime);
+                    const preExtraHours = preExtraMinutes / 60;
+                    const preExtension = preExtraHours * 60 / 30;
+                    price = prices.rest + calculateExtensionCharges(preExtraHours);
+                    plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部)";
+                    return {price, plan};
+                }
+                // 前延長＋休憩(＋延長)
+                else if(checkInTime === 9 && hours >= 8){
+                    const preExtraMinutes = Math.max(10 * 60 - calculateCheckInTime);
+                    const preExtraHours = preExtraMinutes / 60;
+                    const preExtension = preExtraHours * 60 / 30;
+                    price = prices.rest + calculateExtensionCharges(preExtraHours);
+                    plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部)";
+                    return {price, plan};
+                }
+                // 前延長＋休憩(＋延長)
+                else if(checkInTime === 9.5){
+                    const preExtraMinutes = Math.max(10 * 60 - calculateCheckInTime);
+                    const preExtraHours = preExtraMinutes / 60;
+                    const preExtension = preExtraHours * 60 / 30;
+                    price = prices.rest + calculateExtensionCharges(preExtraHours);
+                    plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部)";
+                    return {price, plan};
+                }
+                // チェックアウトが16:00を超える場合の処理
+                else{
+                    const extraMinutes = Math.max(checkOutTime - 16 * 60); 
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    price = prices.rest + calculateExtensionCharges(extraHours);
+                    const extension = extraHours * 60 / 30;
+                    plan = "休憩(サービスタイム1部) + 延長" + extension + "本";
+                    return {price, plan};
+                }
+            }
+            // サービス＋休憩(22時までにチェックアウトの場合)
+            else if((checkOutTime <= 22 * 60 && checkOutTime > 18.5 * 60) && hours <= 16){
+                if(checkInTime > 7 && hours < 12){
+                    // 前延長＋休憩(＋延長)
+                    if(checkInTime === 7.5){
+                        const preExtraMinutes = Math.max(10 * 60 - calculateCheckInTime);
+                        const preExtraHours = preExtraMinutes / 60;
+                        const preExtension = preExtraHours * 60 / 30;
+                        price = prices.rest + calculateExtensionCharges(preExtraHours);
+                        plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部)";
+                        return {price, plan};
+                    }
+                    else if(checkInTime === 8){
+                        if(checkOutTime <= 19 * 60){
+                            const extraMinutes = Math.max(10 * 60 - calculateCheckInTime);
+                            const extraHours = extraMinutes / 60;
+                            const preExtension = extraHours * 60 / 30;
+                            price = prices.rest + calculateExtensionCharges(extraHours);
+                            plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部)";
+                            return {price, plan};
+                        }
+                        else{
+                            const extraMinutes = Math.max(checkOutTime - 19 * 60); 
+                            const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                            const extension = extraHours * 60 / 30;
+                            const preExtraMinutes = Math.max(10 * 60 - calculateCheckInTime);
+                            const preExtraHours = preExtraMinutes / 60;
+                            const preExtension = preExtraHours * 60 / 30;
+                            price = calculateExtensionCharges(preExtraHours) + prices.rest + calculateExtensionCharges(extraHours);
+                            plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部) + 延長" + extension + "本";
+                            return {price, plan};
+                        }
+                    }
+                    else if(checkInTime === 8.5){
+                        if(checkOutTime <= 19 * 60){
+                            const extraMinutes = Math.max(10 * 60 - calculateCheckInTime);
+                            const extraHours = extraMinutes / 60;
+                            const preExtension = extraHours * 60 / 30;
+                            price = prices.rest + calculateExtensionCharges(extraHours);
+                            plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部)";
+                            return {price, plan};
+                        }
+                        else{
+                            const extraMinutes = Math.max(checkOutTime - 19 * 60); 
+                            const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                            const extension = extraHours * 60 / 30;
+                            const preExtraMinutes = Math.max(10 * 60 - calculateCheckInTime);
+                            const preExtraHours = preExtraMinutes / 60;
+                            const preExtension = preExtraHours * 60 / 30;
+                            price = calculateExtensionCharges(preExtraHours) + prices.rest + calculateExtensionCharges(extraHours);
+                            plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部) + 延長" + extension + "本";
+                            return {price, plan};
+                        }
+                    }
+                    else if(checkInTime === 9){
+                        if(checkOutTime <= 19 * 60){
+                            const extraMinutes = Math.max(10 * 60 - calculateCheckInTime);
+                            const extraHours = extraMinutes / 60;
+                            const preExtension = extraHours * 60 / 30;
+                            price = prices.rest + calculateExtensionCharges(extraHours);
+                            plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部)";
+                            return {price, plan};
+                        }
+                        else{
+                            const extraMinutes = Math.max(checkOutTime - 19 * 60); 
+                            const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                            const extension = extraHours * 60 / 30;
+                            const preExtraMinutes = Math.max(10 * 60 - calculateCheckInTime);
+                            const preExtraHours = preExtraMinutes / 60;
+                            const preExtension = preExtraHours * 60 / 30;
+                            price = calculateExtensionCharges(preExtraHours) + prices.rest + calculateExtensionCharges(extraHours);
+                            plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部) + 延長" + extension + "本";
+                            return {price, plan};
+                        }
+                    }
+                    else if(checkInTime === 9.5){
+                        if(checkOutTime <= 19 * 60){
+                            const extraMinutes = Math.max(10 * 60 - calculateCheckInTime);
+                            const extraHours = extraMinutes / 60;
+                            const preExtension = extraHours * 60 / 30;
+                            price = prices.rest + calculateExtensionCharges(extraHours);
+                            plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部)";
+                            return {price, plan};
+                        }
+                        else{
+                            const extraMinutes = Math.max(checkOutTime - 19 * 60); 
+                            const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                            const extension = extraHours * 60 / 30;
+                            const preExtraMinutes = Math.max(10 * 60 - calculateCheckInTime);
+                            const preExtraHours = preExtraMinutes / 60;
+                            const preExtension = preExtraHours * 60 / 30;
+                            price = calculateExtensionCharges(preExtraHours) + prices.rest + calculateExtensionCharges(extraHours);
+                            plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部) + 延長" + extension + "本";
+                            return {price, plan};
+                        }
+                    }
+                }
+                else{
+                    price = prices.rest * 2 ;
+                    plan = "休憩(サービスタイム1部) + 休憩(サービスタイム3部)";
+                    return {price, plan};
+                }
+            }
+            // サービス＋休憩＋延長(25時までにチェックアウトの場合)
+            else if((checkOutTime <= 24 * 60 && checkOutTime > 22 * 60) && hours < 19){
+                if(checkInTime === 9){
+                    if(checkOutTime === 23 * 60){
+                        const preExtraMinutes = Math.max(10 * 60 - calculateCheckInTime);
+                        const preExtraHours = preExtraMinutes / 60;
+                        const preExtension = preExtraHours * 60 / 30;
+                        price = prices.rest * 2 + calculateExtensionCharges(preExtraHours);
+                        plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部) + 休憩(4時間)";
+                        return {price, plan};
+                    }
+                    else if(checkOutTime === 23.5 * 60){
+                        const extraMinutes = Math.max(checkOutTime - 23 * 60); 
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        const extension = extraHours * 60 / 30;
+                        const preExtraMinutes = Math.max(10 * 60 - calculateCheckInTime);
+                        const preExtraHours = preExtraMinutes / 60;
+                        const preExtension = preExtraHours * 60 / 30;
+                        price = calculateExtensionCharges(preExtraHours) + prices.rest * 2 + calculateExtensionCharges(extraHours);
+                        plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部) + 休憩(4時間) + 延長" + extension + "本";
+                        return {price, plan};
+                    }
+                }
+                if(checkInTime === 9.5 && checkOutTime >= 22 * 60){
+                    if(checkOutTime <= 23 * 60){
+                        const extraMinutes = Math.max(10 * 60 - calculateCheckInTime);
+                        const extraHours = extraMinutes / 60;
+                        const preExtension = extraHours * 60 / 30;
+                        price = prices.rest * 2 + calculateExtensionCharges(extraHours);
+                        plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部) + 休憩(4時間)";
+                        return {price, plan};
+                    }
+                    else{
+                        const extraMinutes = Math.max(checkOutTime - 23 * 60); 
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        const extension = extraHours * 60 / 30;
+                        const preExtraMinutes = Math.max(10 * 60 - calculateCheckInTime);
+                        const preExtraHours = preExtraMinutes / 60;
+                        const preExtension = preExtraHours * 60 / 30;
+                        price = calculateExtensionCharges(preExtraHours) + prices.rest * 2 + calculateExtensionCharges(extraHours);
+                        plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部) + 休憩(4時間) + 延長" + extension + "本";
+                        return {price, plan};
+                    }
+                }
+                else{
+                    const extraMinutes = Math.max(checkOutTime - 22 * 60); 
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    price = prices.rest * 2 + calculateExtensionCharges(extraHours);
+                    const extension = extraHours * 60 / 30;
+                    plan = "休憩(サービスタイム1部) + 休憩(サービスタイム3部) + 延長" + extension + "本";
+                    return {price, plan};
+                }
+            }
+            // サービス＋休憩＋延長(25時までにチェックアウトの場合)
+            else if(checkOutTime < 1 * 60 && hours < 19){
+                if(checkInTime === 9){
+                    const extraMinutes = Math.max(checkOutTime + 1 * 60); 
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    const extension = extraHours * 60 / 30;
+                    const preExtraMinutes = Math.max(10 * 60 - calculateCheckInTime);
+                    const preExtraHours = preExtraMinutes / 60;
+                    const preExtension = preExtraHours * 60 / 30;
+                    price = calculateExtensionCharges(preExtraHours) + prices.rest * 2 + calculateExtensionCharges(extraHours);
+                    plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部) + 休憩(4時間) + 延長" + extension + "本";
+                    return {price, plan};
+                }
+                else if(checkInTime === 9.5){
+                    const extraMinutes = Math.max(checkOutTime + 1 * 60); 
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    const extension = extraHours * 60 / 30;
+                    const preExtraMinutes = Math.max(10 * 60 - calculateCheckInTime);
+                    const preExtraHours = preExtraMinutes / 60;
+                    const preExtension = preExtraHours * 60 / 30;
+                    price = calculateExtensionCharges(preExtraHours) + prices.rest * 2 + calculateExtensionCharges(extraHours);
+                    plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部) + 休憩(4時間) + 延長" + extension + "本";
+                    return {price, plan};
+                }
+                else{
+                    const extraMinutes = Math.max(checkOutTime + 60 * 2); 
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    price = prices.rest * 2 + calculateExtensionCharges(extraHours);
+                    const extension = extraHours * 60 / 30;
+                    plan = "休憩(サービスタイム1部) + 休憩(サービスタイム3部) + 延長" + extension + "本";
+                    return {price, plan}; 
+                }
+            }
+            // サービス1＋サービス3＋延長(25時までにチェックアウトの場合)
+            else if((checkOutTime <= 2 * 60 && checkOutTime >= 1 * 60) && hours <= 20){
+                if(checkInTime === 9.5){
+                    if(checkOutTime === 1 * 60){
+                        const extraMinutes = Math.max(checkOutTime + 1 * 60); 
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        const extension = extraHours * 60 / 30;
+                        const preExtraMinutes = Math.max(10 * 60 - calculateCheckInTime);
+                        const preExtraHours = preExtraMinutes / 60;
+                        const preExtension = preExtraHours * 60 / 30;
+                        price = calculateExtensionCharges(preExtraHours) + prices.rest * 2 + calculateExtensionCharges(extraHours);
+                        plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部) + 休憩(4時間) + 延長" + extension + "本";
+                        return {price, plan};
+                    }
+                    else{
+                        const preExtraMinutes = Math.max(10 * 60 - calculateCheckInTime);
+                        const preExtraHours = preExtraMinutes / 60;
+                        const preExtension = preExtraHours * 60 / 30;
+                        price = calculateExtensionCharges(preExtraHours) + prices.rest + prices.stay;
+                        plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部) + 宿泊1部";
+                        return {price, plan};
+                    }
+                }
+                else{
+                    price = prices.rest * 3;
+                    plan = "休憩(サービスタイム1部) + 休憩(サービスタイム3部) + 休憩(4時間)";
+                    return {price, plan};
+                } 
+            }
+            // サービス1部+延長4本+宿泊1部
+            else {
+                if(checkInTime > 8){
+                    const preExtraMinutes = Math.max(10 * 60 - calculateCheckInTime);
+                    const preExtraHours = preExtraMinutes / 60;
+                    const preExtension = preExtraHours * 60 / 30;
+                    price = calculateExtensionCharges(preExtraHours) + prices.rest + prices.stay;
+                    plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部) + 宿泊1部";
+                    return {price, plan};
+                }
+                else{
+                    const extraHours = 2.0;
+                    price = prices.rest + prices.stay + calculateExtensionCharges(extraHours);
+                    plan = "休憩(サービスタイム1部) + 延長4本 + 宿泊1部";
+                    return {price, plan};
+                } 
+            }
+        }
+        // 10：00〜13：30にチェックイン
+        if(checkInTime >= 10 && checkInTime < 14){
+            if(checkOutTime <= 19 * 60 && hours <= 9){
+                price = prices.rest;
+                plan = "休憩(サービスタイム2部)";
+                return {price, plan};
+            }
+            else if((checkOutTime < 22 * 60 && checkOutTime > 19 * 60) && hours <= 11.5){
+                //前延長＋休憩
+                if((checkInTime > 11 && checkInTime <= 13) && checkOutTime === 21.5 * 60){
+                    const extraMinutes = Math.max(14 * 60 - calculateCheckInTime);
+                    const extraHours = extraMinutes / 60;
+                    const preExtension = extraHours * 60 / 30;
+                    price = prices.rest + calculateExtensionCharges(extraHours);
+                    plan = "前延長" + preExtension + "本 + 休憩(サービスタイム3部)";
+                    return {price, plan};
+                }
+                else if(checkInTime === 12 && hours >= 9){
+                    const extraMinutes = Math.max(14 * 60 - calculateCheckInTime);
+                    const extraHours = extraMinutes / 60;
+                    const preExtension = extraHours * 60 / 30;
+                    price = prices.rest + calculateExtensionCharges(extraHours);
+                    plan = "前延長" + preExtension + "本 + 休憩(サービスタイム3部)";
+                    return {price, plan};
+                }
+                else if(checkInTime === 12.5 && hours >= 8){
+                    const extraMinutes = Math.max(14 * 60 - calculateCheckInTime);
+                    const extraHours = extraMinutes / 60;
+                    const preExtension = extraHours * 60 / 30;
+                    price = prices.rest + calculateExtensionCharges(extraHours);
+                    plan = "前延長" + preExtension + "本 + 休憩(サービスタイム3部)";
+                    return {price, plan};
+                }
+                else if(checkInTime === 13 && hours >= 7){
+                    const extraMinutes = Math.max(14 * 60 - calculateCheckInTime);
+                    const extraHours = extraMinutes / 60;
+                    const preExtension = extraHours * 60 / 30;
+                    price = prices.rest + calculateExtensionCharges(extraHours);
+                    plan = "前延長" + preExtension + "本 + 休憩(サービスタイム3部)";
+                    return {price, plan};
+                }
+                else if(checkInTime === 13.5 && hours >= 6){
+                    const extraMinutes = Math.max(14 * 60 - calculateCheckInTime);
+                    const extraHours = extraMinutes / 60;
+                    const preExtension = extraHours * 60 / 30;
+                    price = prices.rest + calculateExtensionCharges(extraHours);
+                    plan = "前延長" + preExtension + "本 + 休憩(サービスタイム3部)";
+                    return {price, plan};
+                }
+                // チェックアウトが19:00を超える場合の処理
+                else{
+                    const extraMinutes = Math.max(checkOutTime - 19 * 60); 
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    price = prices.rest + calculateExtensionCharges(extraHours);
+                    const extension = extraHours * 60 / 30;
+                    plan = "休憩(サービスタイム3部) + 延長" + extension + "本";
+                    return {price, plan};
+                }
+            }
+            // サービス＋休憩(23時までにチェックアウトの場合)
+            else if((checkOutTime <= 23 * 60 && checkOutTime >= 22 * 60) && hours <= 13){
+                if((checkInTime > 11 && checkInTime <= 13) && checkOutTime === 22 * 60){
+                    const extraMinutes = Math.max(14 * 60 - calculateCheckInTime);
+                    const extraHours = extraMinutes / 60;
+                    const preExtension = extraHours * 60 / 30;
+                    price = prices.rest + calculateExtensionCharges(extraHours);
+                    plan = "前延長" + preExtension + "本 + 休憩(サービスタイム3部)";
+                    return {price, plan};
+                }
+                else if(checkInTime === 13.5 && hours === 8.5){
+                    const extraMinutes = Math.max(14 * 60 - calculateCheckInTime);
+                    const extraHours = extraMinutes / 60;
+                    const preExtension = extraHours * 60 / 30;
+                    price = prices.rest + calculateExtensionCharges(extraHours);
+                    plan = "前延長" + preExtension + "本 + 休憩(サービスタイム3部)";
+                    return {price, plan};
+                }
+                else if(checkInTime >= 12 && checkOutTime === 22.5 * 60){
+                    const extraMinutes = Math.max(checkOutTime - 22 * 60); 
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    const extension = extraHours * 60 / 30;
+                    const preExtraMinutes = Math.max(14 * 60 - calculateCheckInTime);
+                    const preExtraHours = preExtraMinutes / 60;
+                    const preExtension = preExtraHours * 60 / 30;
+                    price = calculateExtensionCharges(preExtraHours) + prices.rest + calculateExtensionCharges(extraHours);
+                    plan = "前延長" + preExtension + "本 + 休憩(サービスタイム3部) + 延長" + extension + "本";
+                    return {price, plan};
+                }
+                else if(checkInTime > 12 && checkOutTime === 23 * 60){
+                    const extraMinutes = Math.max(checkOutTime - 22 * 60); 
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    const extension = extraHours * 60 / 30;
+                    const preExtraMinutes = Math.max(14 * 60 - calculateCheckInTime);
+                    const preExtraHours = preExtraMinutes / 60;
+                    const preExtension = preExtraHours * 60 / 30;
+                    price = calculateExtensionCharges(preExtraHours) + prices.rest + calculateExtensionCharges(extraHours);
+                    plan = "前延長" + preExtension + "本 + 休憩(サービスタイム3部) + 延長" + extension + "本";
+                    return {price, plan};
+                }
+                else{
+                    price = prices.rest * 2 ;
+                    plan = "休憩(サービスタイム2部) + 休憩(4時間)";
+                    return {price, plan};
+                }
+            }
+            // サービス＋休憩＋延長(25時までにチェックアウトの場合)
+            else if((checkOutTime <= 24 * 60 && checkOutTime > 23 * 60) && hours <= 15){
+                if(checkInTime > 12){
+                    const extraMinutes = Math.max(checkOutTime - 22 * 60); 
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    const extension = extraHours * 60 / 30;
+                    const preExtraMinutes = Math.max(14 * 60 - calculateCheckInTime);
+                    const preExtraHours = preExtraMinutes / 60;
+                    const preExtension = preExtraHours * 60 / 30;
+                    price = calculateExtensionCharges(preExtraHours) + prices.rest + calculateExtensionCharges(extraHours);
+                    plan = "前延長" + preExtension + "本 + 休憩(サービスタイム3部) + 延長" + extension + "本";
+                    return {price, plan};
+                }
+                else{
+                    const extraMinutes = Math.max(checkOutTime - 23 * 60); 
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    price = prices.rest * 2 + calculateExtensionCharges(extraHours);
+                    const extension = extraHours * 60 / 30;
+                    plan = "休憩(サービスタイム2部) + 休憩(4時間) + 延長" + extension + "本"; 
+                    return {price, plan};
+                }
+            }
+            // サービス＋休憩＋延長(25時までにチェックアウトの場合)
+            else if(checkOutTime <= 1 * 60 && hours <= 15){
+                if(checkInTime > 12 && checkOutTime < 1 * 60){
+                    const extraMinutes = Math.max(2 * 60 + checkOutTime); 
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    const extension = extraHours * 60 / 30;
+                    const preExtraMinutes = Math.max(14 * 60 - calculateCheckInTime);
+                    const preExtraHours = preExtraMinutes / 60;
+                    const preExtension = preExtraHours * 60 / 30;
+                    price = calculateExtensionCharges(preExtraHours) + prices.rest + calculateExtensionCharges(extraHours);
+                    plan = "前延長" + preExtension + "本 + 休憩(サービスタイム3部) + 延長" + extension + "本";
+                    return {price, plan};
+                }
+                else if(checkInTime >= 12 && checkOutTime === 1 * 60){
+                    const extraMinutes = Math.max(14 * 60 - calculateCheckInTime);
+                    const extraHours = extraMinutes / 60;
+                    const preExtension = extraHours * 60 / 30;
+                    price = prices.rest * 2 + calculateExtensionCharges(extraHours);
+                    plan = "前延長" + preExtension + "本 + 休憩(サービスタイム3部) + 休憩(4時間)";
+                    return {price, plan};
+                }
+                else{
+                    const extraMinutes = Math.max(checkOutTime + 1 * 60); 
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    price = prices.rest * 2 + calculateExtensionCharges(extraHours);
+                    const extension = extraHours * 60 / 30;
+                    plan = "休憩(サービスタイム2部) + 休憩(4時間) + 延長" + extension + "本";
+                    return {price, plan};
+                }
+            }
+            // サービス2部+宿泊1部
+            else if (checkOutTime <= 12 * 60) {
+                if(checkInTime >= 12 && checkOutTime <= 2 * 60){
+                    const extraMinutes = Math.max(14 * 60 - calculateCheckInTime);
+                    const extraHours = extraMinutes / 60;
+                    const preExtension = extraHours * 60 / 30;
+                    price = prices.rest * 2 + calculateExtensionCharges(extraHours);
+                    plan = "前延長" + preExtension + "本 + 休憩(サービスタイム3部) + 休憩(4時間)";
+                    return {price, plan};
+                }
+                else{
+                    price = prices.rest + prices.stay;
+                    plan = "休憩(サービスタイム2部) + 宿泊1部";
+                    return {price, plan};
+                }
+            }
+            // サービス2部+宿泊1部＋延長
+            else {
+                const extraMinutes = Math.max(checkOutTime - 12 * 60); 
+                const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                price = prices.rest + prices.stay + calculateExtensionCharges(extraHours);
+                const extension = extraHours * 60 / 30;
+                plan = "休憩(サービスタイム2部) + 宿泊1部 + 延長" + extension + "本";
+                return {price, plan};
+            }
+        }
+        // 14：00〜17：30にチェックイン
+        else if(checkInTime >= 14 && checkInTime < 18){
+            if((checkOutTime <= 22 * 60 && checkOutTime >= 14 * 60) && hours <= 8){
+                price = prices.rest;
+                plan = "休憩(サービスタイム3部)";
+                return {price, plan};
+            }
+            // サービス＋延長(25時までにチェックアウトの場合)
+            else if((checkOutTime <= 24 * 60 && checkOutTime > 22 * 60) && hours <= 10.5){
+                // チェックアウトが19:00を超える場合の処理
+                const extraMinutes = Math.max(checkOutTime - 22 * 60); 
+                const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                price = prices.rest + calculateExtensionCharges(extraHours);
+                const extension = extraHours * 60 / 30;
+                plan = "休憩(サービスタイム3部) + 延長" + extension + "本";
+                return {price, plan};
+            }
+            // サービス＋延長(25時までにチェックアウトの場合)
+            else if(checkOutTime < 1 * 60 && hours <= 10.5){
+                const extraMinutes = Math.max(checkOutTime + 60 * 2); 
+                const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                price = prices.rest + calculateExtensionCharges(extraHours);
+                const extension = extraHours * 60 / 30;
+                plan = "休憩(サービスタイム3部)+ 延長" + extension + "本";
+                return {price, plan};
+            }
+            // サービス＋休憩(26時までにチェックアウトの場合)
+            else if((checkOutTime <= 2 * 60 && checkOutTime >= 1 * 60) && hours <= 12){
+                if(checkInTime === 17.5){
+                    const preExtraMinutes = Math.max(18 * 60 - calculateCheckInTime);
+                    const preExtraHours = preExtraMinutes / 60;
+                    const preExtension = preExtraHours * 60 / 30;
+                    price = calculateExtensionCharges(preExtraHours) + prices.stay;
+                    plan = "前延長" + preExtension + "本 + 宿泊1部";
+                    return {price, plan};
+                }
+                else{
+                    price = prices.rest * 2 ;
+                    plan = "休憩(サービスタイム3部) + 休憩(4時間)";
+                    return {price, plan};
+                }
+            }
+            // // サービス3部+宿泊2部
+            else if(checkOutTime <= 14 * 60 && hours <= 24){
+                if(checkInTime > 15){
+                    if(checkOutTime <= 12 * 60){
+                        const preExtraMinutes = Math.max(18 * 60 - calculateCheckInTime);
+                        const preExtraHours = preExtraMinutes / 60;
+                        const preExtension = preExtraHours * 60 / 30;
+                        price = calculateExtensionCharges(preExtraHours) + prices.stay;
+                        plan = "前延長" + preExtension + "本 + 宿泊1部";
+                        return {price, plan};
+                    }
+                    else{
+                        const extraMinutes = Math.max(checkOutTime - 12 * 60); 
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        const extension = extraHours * 60 / 30;
+                        const preExtraMinutes = Math.max(18 * 60 - calculateCheckInTime);
+                        const preExtraHours = preExtraMinutes / 60;
+                        const preExtension = preExtraHours * 60 / 30;
+                        price = calculateExtensionCharges(preExtraHours) + prices.stay + calculateExtensionCharges(extraHours);
+                        plan = "前延長" + preExtension + "本 + 宿泊1部 + 延長" + extension + "本";
+                        return {price, plan};
+                    }
+                }
+                else{
+                    price = prices.rest + prices.stay;
+                    plan = "休憩(サービスタイム3部) + 宿泊2部";
+                    return {price, plan};
+                } 
+            }
+            // サービス3部＋宿泊2部＋延長
+            else if((checkOutTime <= 15.5 * 60 && checkOutTime > 14 * 60) && hours <= 24){
+                if(checkInTime > 15){
+                    if(checkOutTime < 15 * 60){
+                        const extraMinutes = Math.max(checkOutTime - 12 * 60); 
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        const extension = extraHours * 60 / 30;
+                        const preExtraMinutes = Math.max(18 * 60 - calculateCheckInTime);
+                        const preExtraHours = preExtraMinutes / 60;
+                        const preExtension = preExtraHours * 60 / 30;
+                        price = calculateExtensionCharges(preExtraHours) + prices.stay + calculateExtensionCharges(extraHours);
+                        plan = "前延長" + preExtension + "本 + 宿泊1部 + 延長" + extension + "本";
+                        return {price, plan};
+                    }
+                    // 前延長+サービス3部＋宿泊2部
+                    else {
+                        const extraMinutes = Math.max(18 * 60 - calculateCheckInTime);
+                        const extraHours = extraMinutes / 60;
+                        const preExtension = extraHours * 60 / 30;
+                        price = prices.stay + prices.rest + calculateExtensionCharges(extraHours);
+                        plan = "前延長" + preExtension + "本 + 宿泊1部 + 休憩(サービスタイム2部)";
+                        return {price, plan};
+                    }
+                }
+                else{
+                    const extraMinutes = Math.max(checkOutTime - 14 * 60); 
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    price = prices.rest + prices.stay + calculateExtensionCharges(extraHours);
+                    const extension = extraHours * 60 / 30;
+                    plan = "休憩(サービスタイム3部) + 宿泊2部+ 延長" + extension + "本"; 
+                    return {price, plan};
+                }
+            }
+            else{
+                const extraMinutes = Math.max(18 * 60 - calculateCheckInTime);
+                const extraHours = extraMinutes / 60;
+                const preExtension = extraHours * 60 / 30;
+                price = prices.stay + prices.rest + calculateExtensionCharges(extraHours);
+                plan = "前延長" + preExtension + "本 + 宿泊1部 + 休憩(サービスタイム2部)";
+                return {price, plan};
+            }
+        }
+        // 18：00〜21：30にチェックイン
+        else if(checkInTime >= 18 && checkInTime < 22){
+            if(hours <= 4){
+                price = prices.rest;
+                plan = "休憩(4時間)";
+                return {price, plan};
+            }
+            // サービス＋延長(24時までにチェックアウトの場合)
+            else if(hours <= 6){
+                if((checkInTime > 20 && checkInTime < 22) && checkOutTime > 2 * 60){
+                    price = prices.stay;
+                    plan = "宿泊1部"; 
+                    return {price, plan};
+                }
+                else{
+                    const extraMinutes = Math.max(hours * 60 - 4 * 60); 
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    price = prices.rest + calculateExtensionCharges(extraHours);
+                    const extension = extraHours * 60 / 30;
+                    plan = "休憩(4時間) + 延長" + extension + "本";
+                    return {price, plan};
+                }
+            }
+            else if(checkOutTime === 0 && hours <= 6){
+                const extraMinutes = Math.max(2 * 60 + checkOutTime); 
+                const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                price = prices.rest + calculateExtensionCharges(extraHours);
+                const extension = extraHours * 60 / 30;
+                plan = "休憩(4時間) + 延長" + extension + "本";
+                return {price, plan};
+            }
+            // 宿泊1部
+            else if(checkOutTime <= 12 * 60 && hours <= 18){
+                price = prices.stay;
+                plan = "宿泊1部"; 
+                return {price, plan};
+            }
+            // 宿泊1部＋延長
+            else if((checkOutTime < 15 * 60 && checkOutTime > 12 * 60) && hours < 21){
+                if(checkInTime === 21.5 && checkOutTime === 12.5 * 60){
+                    const preExtraMinutes = Math.max(22 * 60 - calculateCheckInTime);
+                    const preExtraHours = preExtraMinutes / 60;
+                    const preExtension = preExtraHours * 60 / 30;
+                    price = calculateExtensionCharges(preExtraHours) + prices.stay;
+                    plan = "前延長" + preExtension + "本 + 宿泊2部";
+                    return {price, plan};
+                }
+                else if(checkInTime >= 21 && (checkOutTime >= 13 * 60 && checkOutTime < 14 * 60)){
+                    const preExtraMinutes = Math.max(22 * 60 - calculateCheckInTime);
+                        const preExtraHours = preExtraMinutes / 60;
+                        const preExtension = preExtraHours * 60 / 30;
+                        price = calculateExtensionCharges(preExtraHours) + prices.stay;
+                        plan = "前延長" + preExtension + "本 + 宿泊2部";
+                        return {price, plan};
+                }
+                else if(checkInTime > 20 && checkOutTime > 13 * 60){
+                    if(checkOutTime <= 14 * 60){
+                        const preExtraMinutes = Math.max(22 * 60 - calculateCheckInTime);
+                        const preExtraHours = preExtraMinutes / 60;
+                        const preExtension = preExtraHours * 60 / 30;
+                        price = calculateExtensionCharges(preExtraHours) + prices.stay;
+                        plan = "前延長" + preExtension + "本 + 宿泊2部";
+                        return {price, plan};
+                    }
+                    else{
+                        const extraMinutes = Math.max(checkOutTime - 14 * 60); 
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        const extension = extraHours * 60 / 30;
+                        const preExtraMinutes = Math.max(22 * 60 - calculateCheckInTime);
+                        const preExtraHours = preExtraMinutes / 60;
+                        const preExtension = preExtraHours * 60 / 30;
+                        price = calculateExtensionCharges(preExtraHours) + prices.stay + calculateExtensionCharges(extraHours);
+                        plan = "前延長" + preExtension + "本 + 宿泊2部 + 延長" + extension + "本";
+                        return {price, plan};
+                    }
+                }
+                else{
+                    const extraMinutes = Math.max(checkOutTime - 12 * 60); 
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    price = prices.stay + calculateExtensionCharges(extraHours);
+                    const extension = extraHours * 60 / 30;
+                    plan = "宿泊1部 + 延長" + extension + "本";
+                    return {price, plan};
+                }
+            }
+            // 宿泊1部＋サービス2部
+            else if((checkOutTime <= 18 * 60 && checkOutTime >= 15 * 60) && hours <= 24){
+                if(checkInTime > 20 && hours < 19){
+                    const extraMinutes = Math.max(checkOutTime - 14 * 60); 
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    const extension = extraHours * 60 / 30;
+                    const preExtraMinutes = Math.max(22 * 60 - calculateCheckInTime);
+                    const preExtraHours = preExtraMinutes / 60;
+                    const preExtension = preExtraHours * 60 / 30;
+                    price = calculateExtensionCharges(preExtraHours) + prices.stay + calculateExtensionCharges(extraHours);
+                    plan = "前延長" + preExtension + "本 + 宿泊2部 + 延長" + extension + "本";
+                    return {price, plan};
+                }
+                else{
+                    price = prices.rest + prices.stay;
+                    plan = "宿泊1部 + 休憩(サービスタイム2部)";
+                    return {price, plan};
+                } 
+            }
+            // 前延長+サービス3部＋宿泊2部
+            else {
+                if(checkInTime === 21 && hours === 24){
+                    const preExtraMinutes = Math.max(22 * 60 - calculateCheckInTime);
+                    const preExtraHours = preExtraMinutes / 60;
+                    const preExtension = preExtraHours * 60 / 30;
+                    price = calculateExtensionCharges(preExtraHours) + prices.stay + prices.rest;
+                    plan = "前延長" + preExtension + "本 + 宿泊2部 + 休憩(サービスタイム3部)";
+                    return {price, plan};
+                }
+                else if(checkInTime === 21.5 && hours >= 23){
+                    const preExtraMinutes = Math.max(22 * 60 - calculateCheckInTime);
+                    const preExtraHours = preExtraMinutes / 60;
+                    const preExtension = preExtraHours * 60 / 30;
+                    price = calculateExtensionCharges(preExtraHours) + prices.stay + prices.rest;
+                    plan = "前延長" + preExtension + "本 + 宿泊2部 + 休憩(サービスタイム3部)";
+                    return {price, plan};
+                }
+                else if(checkInTime > 20 && checkOutTime > 20 * 60){
+                    const extraMinutes = Math.max(checkOutTime - 20 * 60); 
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    price = prices.rest + prices.stay + calculateExtensionCharges(extraHours);
+                    const extension = extraHours * 60 / 30;
+                    plan = "宿泊1部 + 休憩(サービスタイム2部) + 延長" + extension + "本";
+                    return {price, plan};
+                }
+                else{
+                    price = prices.rest + prices.stay;
+                    plan = "宿泊1部 + 休憩(サービスタイム2部)";
+                    return {price, plan};
+                } 
+            }
+        }
+        //22:00~5:30
+        else if(((checkInTime >= 22 && checkInTime < 24) || checkInTime < 6)){
+            // 宿泊2部(22:00〜翌の保証枠)の打ち切り時刻は区分で異なる（仕様書4-3）:
+            //   日・祝(D区分・12時間保証): 22:00〜翌14:00 → 打ち切り14:00
+            //   土・祝前祝日(C区分・10時間保証): 22:00〜翌12:00 → 打ち切り12:00
+            // 延長→まるごと休憩ブロックへの切替は「延長合計が休憩料金(¥7800)を上回る地点」
+            // (=打ち切り+3h)。2026/6/8 0:00IN 14h→実機¥13,800フラット(D区分)で確認済み。
+            // C区分は実機未確認だが、従来コードの値(12:00打ち切り)がそのまま10時間保証の仕様と
+            // 一致するためC側は変更なし。
+            const part2Cutoff = isSaturdayOrDaysOff(date) ? 12 : 14; // 時
+            const part2Crossover = part2Cutoff + 3; // 時
+            if(checkInTime === 23.5 && hours === 3){
+                price = prices.midnight_rest;
+                plan = "深夜休憩";
+                return {price, plan};
+            }
+            else if (checkInTime < 6){
+                if (hours <= 3) {
+                    price = prices.midnight_rest;
+                    plan = "深夜休憩";
+                    return {price, plan};
+                }
+            }
+            if(checkInTime >= 22){
+                if(checkOutTime <= 2 * 60){
+                    price = prices.rest;
+                    plan = "休憩(4時間)";
+                    return {price, plan};
+                }
+                else if (checkOutTime > 2 * 60 && checkOutTime < part2Crossover * 60) {
+                    if (checkOutTime <= part2Cutoff * 60) {
+                        price = prices.stay;
+                        plan = "宿泊2部";
+                        return {price, plan};
+                    }
+                    else {
+                        const extraMinutes = Math.max(checkOutTime - part2Cutoff * 60);
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        const extension = extraHours * 60 / 30;
+                        price = prices.stay + calculateExtensionCharges(extraHours);
+                        plan = "宿泊2部 + 延長" + extension + "本";
+                        return {price, plan};
+                    }
+                }
+                else if (checkOutTime >= part2Crossover * 60 || checkOutTime < 2 * 60) {
+                    if(checkOutTime <= 23 * 60) {
+                        price = prices.stay + prices.rest;
+                        plan = "宿泊2部 + 休憩(サービスタイム3部)";
+                        return {price, plan};
+                    }
+                    else {
+                        const extraMinutes = Math.max(24 * 60 - checkOutTime) ; 
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        const extension = extraHours * 60 / 30;
+                        price = prices.stay + prices.rest + calculateExtensionCharges(extraHours);
+                        plan = "宿泊2部 + 休憩(サービスタイム3部) + 延長" + extension + "本";
+                        return {price, plan};
+                    }
+                }
+            }
+            if(checkInTime === 0){
+                // part2Cutoff/part2Crossoverは本ブロック冒頭で区分ごとに定義済み。
+                if(hours > 3 && hours <= part2Cutoff){
+                    price = prices.stay;
+                    plan = "宿泊2部";
+                    return {price, plan};
+                }
+                else if(hours < part2Crossover){
+                    const extraMinutes = Math.max(checkOutTime - part2Cutoff * 60);
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    const extension = extraHours * 60 / 30;
+                    price = prices.stay + calculateExtensionCharges(extraHours);
+                    plan = "宿泊2部 + 延長" + extension + "本";
+                    return {price, plan};
+                }
+                else if(hours <= 19){
+                    price = prices.stay + prices.rest;
+                    plan = "宿泊1部 + 休憩(サービスタイム2部)";
+                    return {price, plan};
+                }
+                else if(hours < 21){
+                    const extraMinutes = Math.max(checkOutTime - 19 * 60); 
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    const extension = extraHours * 60 / 30;
+                    price = prices.stay + prices.rest + calculateExtensionCharges(extraHours);
+                    plan = "宿泊1部 + 休憩(サービスタイム2部) + 延長" + extension + "本";
+                    return {price, plan};
+                }
+                else if(hours <= 22){
+                    const preExtraMinutes = Math.max(2 * 60);
+                    const preExtraHours = preExtraMinutes / 60;
+                    const preExtension = preExtraHours * 60 / 30;
+                    price = calculateExtensionCharges(preExtraHours) + prices.stay + prices.rest;
+                    plan = "宿泊2部 + 前延長" + preExtension + "本 + 休憩(サービスタイム3部)";
+                    return {price, plan};
+                }
+                else if(hours < 23){
+                    const preExtraMinutes = Math.max(2 * 60);
+                    const preExtraHours = preExtraMinutes / 60;
+                    const preExtension = preExtraHours * 60 / 30;
+                    const extraMinutes = Math.max(0.5 * 60) ; 
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    const extension = extraHours * 60 / 30;
+                    price = prices.stay + calculateExtensionCharges(preExtraHours) + prices.rest + calculateExtensionCharges(extraHours);
+                    plan = "宿泊2部 + 前延長" + preExtension + "本 + 休憩(サービスタイム3部) + 延長" + extension + "本";
+                    return {price, plan};
+                }
+                else if(hours === 23){
+                    price = prices.stay + prices.rest * 2;
+                    plan = "宿泊1部 + 休憩(サービスタイム2部) + 休憩(4時間)";
+                    return {price, plan};
+                }
+                else if(hours === 23.5){
+                    const extraMinutes = Math.max(0.5 * 60) ; 
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    const extension = extraHours * 60 / 30;
+                    price = prices.stay + prices.rest * 2 + calculateExtensionCharges(extraHours);
+                    plan = "宿泊1部 + 休憩(サービスタイム2部) + 休憩(4時間) + 延長" + extension + "本";
+                    return {price, plan};
+                }
+                else if(hours === 24){
+                    const extraMinutes = Math.max(1 * 60) ; 
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    const extension = extraHours * 60 / 30;
+                    price = prices.stay + prices.rest * 2 + calculateExtensionCharges(extraHours);
+                    plan = "宿泊1部 + 休憩(サービスタイム2部) + 休憩(4時間) + 延長" + extension + "本";
+                    return {price, plan};
+                }
+            }
+            if(checkInTime > 0 && checkInTime <= 2){
+                if(hours <= 3){
+                    price = prices.midnight_rest;
+                    plan = "深夜休憩";
+                    return {price, plan};
+                }
+                else if (checkOutTime <= part2Cutoff * 60 && (hours > 3 && hours < part2Cutoff)){
+                    price = prices.stay;
+                    plan = "宿泊2部";
+                    return {price, plan};
+                }
+                else if ((checkOutTime < part2Crossover * 60 && checkOutTime > part2Cutoff * 60) && hours <= (part2Crossover - 1)){
+                    const extraMinutes = Math.max(checkOutTime - part2Cutoff * 60);
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    const extension = extraHours * 60 / 30;
+                    price = prices.stay + calculateExtensionCharges(extraHours);
+                    plan = "宿泊2部 + 延長" + extension + "本";
+                    return {price, plan};
+                }
+                else if ((checkOutTime <= 19 * 60 && checkOutTime >= part2Crossover * 60) && hours < 19){
+                    price = prices.stay + prices.rest;
+                    plan = "宿泊1部 + 休憩(サービスタイム2部)";
+                    return {price, plan};
+                }
+                else if((checkOutTime < 21 * 60 && checkOutTime >= 19 * 60) && hours <= 20){
+                    const extraMinutes = Math.max(checkOutTime - 19 * 60); 
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    const extension = extraHours * 60 / 30;
+                    price = prices.stay + prices.rest + calculateExtensionCharges(extraHours);
+                    plan = "宿泊1部 + 休憩(サービスタイム2部) + 延長" + extension + "本";
+                    return {price, plan};
+                }
+                else if((checkOutTime <= 22 * 60 && checkOutTime >= 21 * 60) && hours < 22){
+                    const extraMinutes = Math.max(2 * 60); 
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    price = prices.stay + calculateExtensionCharges(extraHours) + prices.rest;
+                    const extension = extraHours * 60 / 30;
+                    plan = "宿泊2部 + 前延長" + extension + "本 + 休憩(サービスタイム3部)";
+                    return {price, plan};
+                }
+                else if((checkOutTime < 23 * 60 && checkOutTime > 22 * 60) && hours <= 22){
+                    const extraMinutes = Math.max(0.5 * 60); 
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    const extension = extraHours * 60 / 30;
+                    const preExtraMinutes = Math.max(2 * 60); 
+                    const preExtraHours = preExtraMinutes / 60; // 延長時間を時間単位で計算
+                    price = prices.stay + calculateExtensionCharges(preExtraHours) + prices.rest + calculateExtensionCharges(extraHours);
+                    const preExtension = preExtraHours * 60 / 30;
+                    plan = "宿泊2部 + 前延長" + preExtension + "本 + 休憩(サービスタイム3部) + 延長" + extension + "本";
+                    return {price, plan};
+                }
+                else if(checkOutTime === 23 * 60 && hours < 23){
+                    price = prices.stay + prices.rest * 2;
+                    plan = "宿泊1部 + 休憩(サービスタイム2部) + 休憩(4時間)";
+                    return {price, plan};
+                }
+                else{
+                    if(checkOutTime === 23.5 * 60){
+                        const extraMinutes = Math.max(0.5 * 60); 
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        const extension = extraHours * 60 / 30;
+                        price = prices.stay + prices.rest * 2 + calculateExtensionCharges(extraHours);
+                        plan = "宿泊1部 + 休憩(サービスタイム2部) + 休憩(4時間) + 延長" + extension + "本";
+                        return {price, plan};
+                    }
+                    else if(checkOutTime < 1 * 60){
+                        const extraMinutes = Math.max(1 * 60 + checkOutTime); 
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        const extension = extraHours * 60 / 30;
+                        price = prices.stay + prices.rest * 2 + calculateExtensionCharges(extraHours);
+                        plan = "宿泊1部 + 休憩(サービスタイム2部) + 休憩(4時間) + 延長" + extension + "本";
+                        return {price, plan};
+                    }
+                    else{
+                        const extraMinutes = Math.max(2 * 60); 
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        price = prices.stay + calculateExtensionCharges(extraHours) + prices.rest * 2;
+                        const extension = extraHours * 60 / 30;
+                        plan = "宿泊2部 + 前延長" + extension + "本 + 休憩(サービスタイム3部) + 休憩(4時間)";
+                        return {price, plan};
+                    }
+                }
+            }
+            else if (checkInTime > 2 && checkInTime < 6) {
+                if(hours <= 3){
+                    price = prices.midnight_rest;
+                    plan = "深夜休憩";
+                    return {price, plan};
+                }
+                else if (hours <= 10){
+                    price = prices.stay;
+                    plan = "宿泊深夜保証10時間";
+                    return {price, plan};
+                }
+                else if (hours < 13){
+                    if(checkInTime === 5.5 && hours === 12.5){
+                        const preExtraMinutes = Math.max(4.5 * 60);
+                        const preExtraHours = preExtraMinutes / 60;
+                        const preExtension = preExtraHours * 60 / 30;
+                        price = calculateExtensionCharges(preExtraHours) + prices.rest;
+                        plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部)";
+                        return {price, plan};
+                    }
+                    else{
+                        const extraMinutes = Math.max((hours - 10) * 60); 
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        const extension = extraHours * 60 / 30;
+                        price = prices.stay + calculateExtensionCharges(extraHours);
+                        plan = "宿泊深夜保証10時間 + 延長" + extension + "本";
+                        return {price, plan};
+                    }
+                }
+                else if (hours < 16){
+                    if(checkInTime > 2 && checkInTime < 4){
+                        price = prices.stay + prices.rest;
+                        plan = "宿泊1部 + 休憩(サービスタイム2部)";
+                        return {price, plan};
+                    }
+                    else if(checkInTime >= 4 && checkInTime <= 5){
+                        price = prices.stay + prices.rest;
+                        plan = "宿泊深夜保証10時間 + 休憩(サービスタイム3部)";
+                        return {price, plan};
+                    }
+                    else if(checkInTime === 5.5 && (hours < 16 && hours >= 14)){
+                        price = prices.stay + prices.rest;
+                        plan = "宿泊深夜保証10時間 + 休憩(サービスタイム3部)";
+                        return {price, plan};
+                    }
+                    else{
+                        const preExtraMinutes = Math.max(4.5 * 60);
+                        const preExtraHours = preExtraMinutes / 60;
+                        const preExtension = preExtraHours * 60 / 30;
+                        price = calculateExtensionCharges(preExtraHours) + prices.rest;
+                        plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部)";
+                        return {price, plan};
+                    }
+                }
+                else if(checkOutTime <= 19 * 60 && hours < 17){
+                    price = prices.stay + prices.rest;
+                    plan = "宿泊1部 + 休憩(サービスタイム2部)";
+                    return {price, plan};
+                }
+                else if((checkOutTime < 20 * 60 && checkOutTime > 19 * 60) && hours <= 17){
+                    if(checkInTime <= 3){
+                        const extraMinutes = Math.max(checkOutTime - 19 * 60); 
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        const extension = extraHours * 60 / 30;
+                        price = prices.stay + prices.rest + calculateExtensionCharges(extraHours);
+                        plan = "宿泊1部 + 休憩(サービスタイム2部) + 延長" + extension + "本";
+                        return {price, plan};
+                    }
+                    else{
+                        const preExtraMinutes = Math.max(0.5 * 60);
+                        const preExtraHours = preExtraMinutes / 60;
+                        const preExtension = preExtraHours * 60 / 30;
+                        price = prices.stay + calculateExtensionCharges(preExtraHours) + prices.rest;
+                        plan = "宿泊深夜保証10時間 + 前延長" + preExtension + "本 + 休憩(サービスタイム3部)";
+                        return {price, plan};
+                    }
+                }
+                else if(checkOutTime === 20 * 60 && hours < 18){
+                    if(checkInTime === 2.5){
+                        const extraMinutes = Math.max(checkOutTime - 19 * 60); 
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        const extension = extraHours * 60 / 30;
+                        price = prices.stay + prices.rest + calculateExtensionCharges(extraHours);
+                        plan = "宿泊1部 + 休憩(サービスタイム2部) + 延長" + extension + "本";
+                        return {price, plan};
+                    }
+                    else if(checkInTime >= 3 && checkInTime < 4){
+                        const preExtraMinutes = Math.max(4 * 60 - calculateCheckInTime);
+                        const preExtraHours = preExtraMinutes / 60;
+                        const preExtension = preExtraHours * 60 / 30;
+                        price = prices.stay + calculateExtensionCharges(preExtraHours) + prices.rest;
+                        plan = "宿泊深夜保証10時間 + 前延長" + preExtension + "本 + 休憩(サービスタイム3部)";
+                        return {price, plan};
+                    }
+                    else{
+                        price = prices.stay + prices.rest;
+                        plan = "宿泊深夜保証10時間 + 休憩(サービスタイム3部)";
+                        return {price, plan};
+                    }
+                }
+                else if((checkOutTime <= 22 * 60 && checkOutTime > 20 * 60) && hours < 20){
+                    if(checkInTime < 4){
+                        const preExtraMinutes = Math.max(4 * 60 - calculateCheckInTime);
+                        const preExtraHours = preExtraMinutes / 60;
+                        const preExtension = preExtraHours * 60 / 30;
+                        price = prices.stay + calculateExtensionCharges(preExtraHours) + prices.rest;
+                        plan = "宿泊深夜保証10時間 + 前延長" + preExtension + "本 + 休憩(サービスタイム3部)";
+                        return {price, plan};
+                    }
+                    else if(checkInTime <= 5 && checkInTime >= 4){
+                        price = prices.stay + prices.rest;
+                        plan = "宿泊深夜保証10時間 + 休憩(サービスタイム3部)";
+                        return {price, plan};
+                    }
+                    else if(checkInTime === 5.5 && (hours < 17)){
+                        price = prices.stay + prices.rest;
+                        plan = "宿泊深夜保証10時間 + 休憩(サービスタイム3部)";
+                        return {price, plan};  
+                    }
+                    else{
+                        const preExtraMinutes = Math.max(4.5 * 60);
+                        const preExtraHours = preExtraMinutes / 60;
+                        const preExtension = preExtraHours * 60 / 30;
+                        price = calculateExtensionCharges(preExtraHours) + prices.rest;
+                        plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部)";
+                        return {price, plan};
+                    }
+                }
+                else if((checkOutTime < 1 * 60 || checkOutTime > 22 * 60) && hours <= 22){
+                    if(checkOutTime > 22 * 60){
+                        if(checkInTime < 4){
+                            const extraMinutes = Math.max(checkOutTime - 22 * 60);
+                            const extraHours = extraMinutes / 60;
+                            const extension = extraHours * 60 / 30;
+                            const preExtraMinutes = Math.max(4 * 60 - calculateCheckInTime);
+                            const preExtraHours = preExtraMinutes / 60;
+                            const preExtension = preExtraHours * 60 / 30;
+                            price = prices.stay + calculateExtensionCharges(preExtraHours) + prices.rest + calculateExtensionCharges(extraHours);
+                            plan = "宿泊深夜保証10時間 + 前延長" + preExtension + "本 + 休憩(サービスタイム3部) + 延長" + extension + "本";
+                            return {price, plan};
+                        }
+                        else{
+                            const extraMinutes = Math.max(checkOutTime - 22 * 60);
+                            const extraHours = extraMinutes / 60;
+                            const extension = extraHours * 60 / 30;
+                            price = prices.stay + calculateExtensionCharges(extraHours) + prices.rest;
+                            plan = "宿泊深夜保証10時間 + 休憩(サービスタイム3部) + 延長" + extension + "本";
+                            return {price, plan};
+                        }
+                    }
+                    else{
+                        if(checkInTime < 4){
+                            const extraMinutes = Math.max(2 * 60 + checkOutTime);
+                            const extraHours = extraMinutes / 60;
+                            const extension = extraHours * 60 / 30;
+                            const preExtraMinutes = Math.max(4 * 60 - calculateCheckInTime);
+                            const preExtraHours = preExtraMinutes / 60;
+                            const preExtension = preExtraHours * 60 / 30;
+                            price = prices.stay + calculateExtensionCharges(preExtraHours) + prices.rest + calculateExtensionCharges(extraHours);
+                            plan = "宿泊深夜保証10時間 + 前延長" + preExtension + "本 + 休憩(サービスタイム3部) + 延長" + extension + "本";
+                            return {price, plan};
+                        }
+                        else{
+                            const extraMinutes = Math.max(2 * 60 + checkOutTime);
+                            const extraHours = extraMinutes / 60;
+                            const extension = extraHours * 60 / 30;
+                            price = prices.stay + calculateExtensionCharges(extraHours) + prices.rest;
+                            plan = "宿泊深夜保証10時間 + 休憩(サービスタイム3部) + 延長" + extension + "本";
+                            return {price, plan};
+                        }
+                    }
+                }
+                else if((checkOutTime <= 2 * 60 && checkOutTime >= 1 * 60) && hours < 24){
+                    if(checkInTime < 4){
+                        const preExtraMinutes = Math.max(4 * 60 - calculateCheckInTime);
+                        const preExtraHours = preExtraMinutes / 60;
+                        const preExtension = preExtraHours * 60 / 30;
+                        price = prices.stay + calculateExtensionCharges(preExtraHours) + prices.rest * 2;
+                        plan = "宿泊深夜保証10時間 + 前延長" + preExtension + "本 + 休憩(サービスタイム3部) + 休憩(4時間)";
+                        return {price, plan};
+                    }
+                    else{
+                        price = prices.stay + prices.rest * 2;
+                        plan = "宿泊深夜保証10時間 + 休憩(サービスタイム3部) + 休憩(4時間)";
+                        return {price, plan};
+                    }
+                }
+                else{
+                    if(checkInTime < 4){
+                        price = prices.stay * 2 + prices.rest;
+                        plan = "宿泊1部 + 休憩(サービスタイム2部) + 宿泊1部";
+                        return {price, plan};
+                    }
+                    else if(checkInTime <= 5){
+                        price = prices.stay * 2 + prices.rest;
+                        plan = "宿泊深夜保証10時間 + 休憩(サービスタイム3部) + 宿泊2部";
+                        return {price, plan};
+                    }
+                    else{
+                        const preExtraMinutes = Math.max(4.5 * 60);
+                        const preExtraHours = preExtraMinutes / 60;
+                        const preExtension = preExtraHours * 60 / 30;
+                        price = calculateExtensionCharges(preExtraHours) + prices.rest + prices.stay;
+                        plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部) + 宿泊1部";
+                        return {price, plan};
+                    }
+                }
+            }
+        }
+    }
+    // 平日
+    else if (!isWeekendOrHoliday(date)) {
+        //宿泊1部(日曜〜金曜)18：00〜12：00
+        if(checkInTime >= 18 && checkInTime < 22){
+            // 20時までにチェックイン
+            // 完成
+            if (checkInTime <= 20) {
+                if(hours <= 5){
+                    price = prices.rest;
+                    plan = "休憩(5時間)";
+                }
+                else if((checkOutTime > 23 * 60 || checkOutTime <= 2 * 60) && hours <= 7) {
+                    if(hours <= 6){
+                        const extraMinutes = Math.max(hours * 60 - 5 * 60); 
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        const extension = extraHours * 60 / 30;
+                        price = prices.rest + calculateExtensionCharges(extraHours);
+                        plan = "休憩(5時間) + 延長" + extension + "本";
+                    }
+                    else if (hours <= 7 && checkOutTime <= 2 * 60) {
+                        const extraMinutes = Math.max(hours * 60 - 5 * 60); 
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        const extension = extraHours * 60 / 30;
+                        price = prices.rest + calculateExtensionCharges(extraHours);
+                        plan = "休憩(5時間) + 延長" + extension + "本";
+                    }
+                    else {
+                        price = prices.stay;
+                        plan = "宿泊1部(平日)";
+                    }
+                }
+                else if (checkOutTime > 1 * 60 && checkOutTime <= 12 * 60) {
+                    price = prices.stay;
+                    plan = "宿泊1部(平日)";
+                }
+                else if (checkOutTime < 15 * 60) {
+                    const extraMinutes = Math.max(checkOutTime - 12 * 60); 
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    const extension = extraHours * 60 / 30;
+                    price = prices.stay + calculateExtensionCharges(extraHours);
+                    plan = "宿泊1部(平日) + 延長" + extension + "本";
+                }
+                else {
+                    price = prices.stay + prices.rest;
+                    plan = "宿泊1部(平日) + 休憩(サービスタイム2部)";
+                }
+            }
+            // 22時までにチェックイン
+            if (checkInTime > 20 && checkInTime < 22) {
+                if (((checkOutTime <= 24 * 60 && checkOutTime >= 23 * 60) || checkOutTime <= 2 * 60) && hours < 6){
+                    if (checkInTime === 20.5 && hours === 5.5) {
+                        const extraMinutes = Math.max(checkOutTime - 1.5 * 60); 
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        const extension = extraHours * 60 / 30;
+                        price = prices.rest + calculateExtensionCharges(extraHours);
+                        plan = "休憩(5時間) + 延長" + extension + "本";
+                    }
+                    else {
+                        price = prices.rest;
+                        plan = "休憩(5時間)";
+                    }
+                }
+                else if (checkOutTime <= 12 * 60) {
+                    price = prices.stay ;
+                    plan = "宿泊1部(平日)";
+                }
+                else if (checkInTime === 20.5 && (hours >= 16 && hours < 17)) {
+                        const extraMinutes = Math.max(checkOutTime - 12 * 60); 
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        const extension = extraHours * 60 / 30;
+                        price = prices.stay + calculateExtensionCharges(extraHours);
+                        plan = "宿泊1部(平日) + 延長" + extension + "本";
+                }
+                else if (checkInTime === 21 && (hours > 15 && hours <= 16)) {
+                    if(hours < 16){
+                        const extraMinutes = Math.max(checkOutTime - 12 * 60); 
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        const extension = extraHours * 60 / 30;
+                        price = prices.stay + calculateExtensionCharges(extraHours);
+                        plan = "宿泊1部(平日) + 延長" + extension + "本";
+                    }
+                    else {
+                        const extraMinutes = Math.max(22 * 60 - calculateCheckInTime);
+                        const extraHours = extraMinutes / 60;
+                        const preExtension = extraHours * 60 / 30;
+                        price = prices.stay + calculateExtensionCharges(extraHours);
+                        plan = "前延長" + preExtension + "本 + 宿泊2部(平日)";
+                    }
+                }
+                else if (checkInTime === 21.5 && (hours >= 15 && hours <= 16)) {
+                    const extraMinutes = Math.max(30);
+                    const extraHours = extraMinutes / 60;
+                    const preExtension = extraHours * 60 / 30;
+                    price = prices.stay + calculateExtensionCharges(extraHours);
+                    plan = "前延長" + preExtension + "本 + 宿泊2部(平日)";
+                }
+                else if (checkOutTime >= 13 * 60 && hours < 19) {
+                    if (checkOutTime <= 14 * 60){
+                        const extraMinutes = Math.max(22 * 60 - calculateCheckInTime);
+                        const extraHours = extraMinutes / 60;
+                        const preExtension = extraHours * 60 / 30;
+                        price = prices.stay + calculateExtensionCharges(extraHours);
+                        plan = "前延長" + preExtension + "本 + 宿泊2部(平日)";
+                    }
+                    else {
+                        const extraMinutes = Math.max(checkOutTime - 14 * 60); 
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        const extension = extraHours * 60 / 30;
+                        const preExtraMinutes = Math.max(22 * 60 - calculateCheckInTime);
+                        const preExtraHours = preExtraMinutes / 60;
+                        const preExtension = preExtraHours * 60 / 30;
+                        price = prices.stay + calculateExtensionCharges(extraHours) + calculatePreExtensionCharges(preExtraHours);
+                        plan = "前延長" + preExtension + "本 + 宿泊2部(平日) + 延長 " + extension + "本";
+                    }
+                }
+                else if (checkOutTime > 15 * 60 && checkOutTime <= 20 * 60 && hours >= 19) {
+                    price = prices.stay + prices.rest;
+                    plan = "宿泊1部(平日) + 休憩(サービスタイム2部)";
+                }
+                else if (checkOutTime === 20.5 * 60) {
+                    if(checkInTime === 20.5 || checkInTime === 21){
+                        const extraMinutes = Math.max(checkOutTime - 20 * 60); 
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        const extension = extraHours * 60 / 30;
+                        price = prices.stay + prices.rest + calculateExtensionCharges(extraHours);
+                        plan = "宿泊1部(平日) + 休憩(サービスタイム2部) + 延長" + extension + "本";
+                    }
+                    else if (checkInTime === 21.5) {
+                        const preExtraMinutes = Math.max(22 * 60 - calculateCheckInTime);
+                        const preExtraHours = preExtraMinutes / 60;
+                        const preExtension = preExtraHours * 60 / 30;
+                        price = prices.stay + prices.rest + calculatePreExtensionCharges(preExtraHours);
+                        plan = "前延長" + preExtension + "本 + 宿泊2部(平日) + 休憩(サービスタイム3部)";
+                    }
+                }
+                else {
+                    const preExtraMinutes = Math.max(22 * 60 - calculateCheckInTime);
+                    const preExtraHours = preExtraMinutes / 60;
+                    const preExtension = preExtraHours * 60 / 30;
+                    price = prices.stay + prices.rest + calculatePreExtensionCharges(preExtraHours);
+                    plan = "前延長" + preExtension + "本 + 宿泊2部(平日) + 休憩(サービスタイム3部)";
+                }
+            }
+        }
+
+        //宿泊2部(日曜〜金曜)22：00〜14：00
+        else if((checkInTime >= 22 && checkInTime < 24) || checkInTime < 6){
+            if((checkInTime >= 22 || checkInTime === 0) && checkOutTime <= 2 * 60){
+                if (checkInTime >= 22) {
+                    price = prices.rest;
+                    plan = "休憩(5時間)";
+                }
+                else if (checkInTime < 2 && hours <= 3) {
+                    price = prices._rest;
+                    plan = "深夜休憩";
+                }
+                else {
+                    price = prices.midnight_rest;
+                    plan = "深夜休憩";
+                }
+            }
+            else if (checkInTime < 6){
+                if (hours <= 3) {
+                    price = prices.midnight_rest;
+                    plan = "深夜休憩";
+                }
+            }
+            else if (checkOutTime > 2 * 60 && checkOutTime < 17 * 60) {
+                if(checkInTime === 23.5 && hours === 3){
+                    price = prices.midnight_rest;
+                    plan = "深夜休憩";
+                }
+                else if (checkOutTime <= 14 * 60) {
+                    price = prices.stay;
+                    plan = "宿泊2部(平日)";
+                }
+                else {
+                    const extraMinutes = Math.max(checkOutTime - 14 * 60); 
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    const extension = extraHours * 60 / 30;
+                    price = prices.stay + calculateExtensionCharges(extraHours);
+                    plan = "宿泊2部(平日) + 延長" + extension + "本";
+                }
+            }
+            else if (checkOutTime >= 17 * 60 || checkOutTime < 2 * 60) {
+                if(checkOutTime <= 23 * 60) {
+                    price = prices.stay + prices.rest;
+                    plan = "宿泊2部(平日) + 休憩(サービスタイム3部)";
+                }
+                else {
+                    const extraMinutes = Math.max(24 * 60 - checkOutTime) ; 
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    const extension = extraHours * 60 / 30;
+                    price = prices.stay + prices.rest + calculateExtensionCharges(extraHours);
+                    plan = "宿泊2部(平日) + 休憩(サービスタイム3部) + 延長" + extension + "本";
+                }
+            }
+            if(checkInTime === 1.5){
+                if(hours <= 3){
+                    price = prices.midnight_rest;
+                    plan = "深夜休憩";
+                }
+                else if (hours < 13){
+                    price = prices.stay;
+                    plan = "宿泊2部(平日)";
+                }
+                else if (hours <= 15){
+                    const extraMinutes = Math.max(checkOutTime - 14 * 60); 
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    const extension = extraHours * 60 / 30;
+                    price = prices.stay + calculateExtensionCharges(extraHours);
+                    plan = "宿泊2部(平日) + 延長" + extension + "本";
+                }
+                else if (hours < 22){
+                    price = prices.stay + prices.rest;
+                    plan = "宿泊2部(平日) + 休憩(サービスタイム3部)";
+                }
+                else if(hours === 22){
+                    const extraMinutes = Math.max(30); 
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    const extension = extraHours * 60 / 30;
+                    price = prices.stay + prices.rest + calculateExtensionCharges(extraHours);
+                    plan = "宿泊2部(平日) + 休憩(サービスタイム3部) + 延長" + extension + "本";
+                }
+                else if (hours <= 24){
+                    const extraMinutes = Math.max(checkOutTime) + 60; 
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    const extension = extraHours * 60 / 30;
+                    price = prices.stay + prices.rest + calculateExtensionCharges(extraHours);
+                    plan = "宿泊2部(平日) + 休憩(サービスタイム3部) + 延長" + extension + "本";
+                }
+                // else {
+                //     price = prices.stay + prices.rest * 2;
+                //     plan = "宿泊2部(平日) + 休憩(サービスタイム3部) + 休憩(5時間)";
+                // }
+            }
+            else if (checkInTime < 6) {
+                if(hours <= 3){
+                    price = prices.midnight_rest;
+                    plan = "深夜休憩";
+                }
+                else if (hours <= 12){
+                    if(checkInTime >= 0 && checkInTime <= 2 && checkOutTime <= 14 * 60){
+                    price = prices.stay;
+                    plan = "宿泊2部(平日)";
+                    }
+                    else {
+                    price = prices.stay;
+                    plan = "宿泊深夜保証12時間";
+                    }
+                }
+                else if (hours < 15){
+                    if (checkInTime >=0 && checkInTime <= 2 && checkOutTime <= 14 * 60){
+                        price = prices.stay;
+                        plan = "宿泊2部(平日)";
+                    }
+                    else if (checkInTime >= 0 && checkInTime <= 2 && checkOutTime > 14 * 60) {
+                        const extraMinutes = Math.max(checkOutTime - 14 * 60); 
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        const extension = extraHours * 60 / 30;
+                        price = prices.stay + calculateExtensionCharges(extraHours);
+                        plan = "宿泊2部(平日) + 延長" + extension + "本";
+                    }
+                    else if(checkInTime === 5.5 && hours === 14.5){
+                        const extraMinutes = Math.max(10 * 60 - calculateCheckInTime);
+                        const extraHours = extraMinutes / 60;
+                        const preExtension = extraHours * 60 / 30;
+                        price = prices.rest + calculateExtensionCharges(extraHours);
+                        plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部)";
+                    }
+                    else {
+                        const extraMinutes = Math.max((hours - 12) * 60); 
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        const extension = extraHours * 60 / 30;
+                        price = prices.stay + calculateExtensionCharges(extraHours);
+                        plan = "宿泊深夜保証12時間 + 延長" + extension + "本";
+                    
+                    }
+                }
+                else if ((checkInTime >= 0 && checkInTime <= 2) && checkOutTime > 14 * 60 && checkOutTime < 17 * 60) {
+                    const extraMinutes = Math.max(checkOutTime - 14 * 60);
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    const extension = extraHours * 60 / 30;
+                    price = prices.stay + calculateExtensionCharges(extraHours);
+                    plan = "宿泊2部(平日) + 延長" + extension + "本";
+                }
+                else if(checkInTime === 0 && (hours >= 17 && hours < 18)){
+                    price = prices.stay + prices.rest;
+                    plan = "宿泊2部(平日) + 休憩(サービスタイム3部)";
+                }
+                else if (checkOutTime <= 23 * 60 && checkOutTime >= 17 * 60 && hours < 21){
+                    price = prices.stay + prices.rest;
+                    plan = "宿泊2部(平日) + 休憩(サービスタイム3部)";
+                }
+                else if (checkOutTime > 23 * 60 && hours <= 23) {
+                    const extraMinutes = Math.max(checkOutTime - 23 * 60); 
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    const extension = extraHours * 60 / 30;
+                    price = prices.stay + prices.rest + calculateExtensionCharges(extraHours);
+                    plan = "宿泊2部(平日) + 休憩(サービスタイム3部) + 延長" + extension + "本";
+                }
+                else if(checkInTime === 0 && hours === 23.5){
+                    const extraMinutes = Math.max(checkOutTime - 23 * 60); 
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    const extension = extraHours * 60 / 30;
+                    price = prices.stay + prices.rest + calculateExtensionCharges(extraHours);
+                    plan = "宿泊2部(平日) + 休憩(サービスタイム3部) + 延長" + extension + "本";
+                }
+                else if (checkOutTime <= 1.5 * 60 && hours <= 24) {
+                    const extraMinutes = Math.max(checkOutTime) + 60; 
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    const extension = extraHours * 60 / 30;
+                    price = prices.stay + prices.rest + calculateExtensionCharges(extraHours);
+                    plan = "宿泊2部(平日) + 休憩(サービスタイム3部) + 延長" + extension + "本";
+                }
+                else if (checkOutTime === 2 * 60 && hours === 20.5){
+                    const extraMinutes = 30; 
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    const extension = extraHours * 60 / 30;
+                    price = prices.stay + prices.midnight_stay + calculateExtensionCharges(extraHours);
+                    plan = "深夜保証 + 延長"  + extension + "本 + 宿泊1部(平日)";
+                }
+                else if (checkOutTime === 2 * 60){
+                    price = prices.stay + prices.rest * 2;
+                    plan = "宿泊2部(平日) + 休憩(サービスタイム3部) + 休憩";
+                }
+                else if (hours === 21 && checkOutTime > 2 * 60 && checkOutTime <= 3 * 60){
+                    const extraMinutes = 30; 
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    const extension = extraHours * 60 / 30;
+                    price = prices.stay + prices.midnight_stay + calculateExtensionCharges(extraHours);
+                    plan = "深夜保証 + 延長"  + extension + "本 + 宿泊1部(平日)";
+                }
+                else if ((checkInTime <= 3) && (checkOutTime > 2 * 60 && checkOutTime <= 3 * 60)){
+                    price = prices.stay* 2 + prices.rest;
+                    plan = "宿泊2部(平日) + 休憩(サービスタイム3部) + 宿泊2部(平日)";
+                }
+                else if (checkInTime > 5 && hours <= 20) {
+                    const extraMinutes = Math.max(18 * 60 - (checkInTime + 12 * 60)); 
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    const extension = extraHours * 60 / 30;
+                    price = prices.stay + prices.rest + calculateExtensionCharges(extraHours);
+                    plan = "宿泊2部(平日) + 休憩(サービスタイム3部) + 延長" + extension + "本";
+                }
+                else if (checkInTime > 3){
+                    if(checkInTime === 3.5 && hours === 24){
+                        price = prices.stay * 2 + prices.rest;
+                        plan = "宿泊2部(平日) + 休憩(サービスタイム3部) + 宿泊2部(平日)";
+                    }
+                    else{
+                        const extraMinutes = Math.max(6 * 60 - calculateCheckInTime); 
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        const extension = extraHours * 60 / 30;
+                        price = prices.stay + prices.midnight_stay + calculateExtensionCharges(extraHours);
+                        plan = "深夜保証 + 延長"  + extension + "本 + 宿泊1部(平日)";
+                    }
+                }
+                else if (hours >= 18 && checkOutTime <= 23 * 60) {
+                    price = prices.stay + prices.rest;
+                    plan = "宿泊2部(平日) + 休憩(サービスタイム3部)";
+                }
+            }
+        }
+        // 休憩プラン・サービスタイム
+        else if ((checkInTime >= 6 && checkInTime < 24) || (checkInTime >= 0 && checkInTime <= 2)) {
+            // 月〜金曜 (6:00 - 18:00)
+            if((checkInTime >= 6 && checkInTime < 10)){
+                if(checkOutTime <= 18 * 60 && hours <= 12){
+                    price = prices.rest;
+                    plan = "休憩(サービスタイム1部)(平日)";
+                }
+                //前延長料金が発生する
+                else if(checkInTime > 8 && (checkOutTime < 22 * 60 && checkOutTime > 19 * 60) && hours < 13){
+                    if(hours < 12 && checkOutTime <= 20 * 60){
+                    // チェックアウトが19:00〜20：00の場合
+                    const extraMinutes = Math.max(10 * 60 - calculateCheckInTime);
+                    const extraHours = extraMinutes / 60;
+                    const preExtension = extraHours * 60 / 30;
+                    price = prices.rest + calculateExtensionCharges(extraHours);
+                    plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部)(平日)";
+                    }
+                    else {
+                    const extraMinutes = Math.max(checkOutTime - 20 * 60); 
+                    const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                    const extension = extraHours * 60 / 30;
+                    const preExtraMinutes = Math.max(10 * 60 - calculateCheckInTime);
+                    const preExtraHours = preExtraMinutes / 60;
+                    const preExtension = preExtraHours * 60 / 30;
+                    price = prices.rest + calculateExtensionCharges(extraHours) + calculatePreExtensionCharges(preExtraHours);
+                    plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部)(平日) + 延長 " + extension + "本";
+                    }
+                }
+                else if((checkOutTime < 21 * 60 && checkOutTime >= 18 * 60) && hours < 15){
+                    if (checkInTime === 9) {
+                        if(hours === 9.5){
+                            const extraMinutes = Math.max(0.5 * 60); 
+                            const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                            price = prices.rest + calculateExtensionCharges(extraHours);
+                            const extension = extraHours * 60 / 30;
+                            plan = "休憩(サービスタイム1部)(平日) + 延長" + extension + "本";
+                        }
+                        if(hours === 10){
+                            const extraMinutes = Math.max(10 * 60 - calculateCheckInTime);
+                            const extraHours = extraMinutes / 60;
+                            const preExtension = extraHours * 60 / 30;
+                            price = prices.rest + calculateExtensionCharges(extraHours);
+                            plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部)(平日)";
+                        }
+                    }
+                    else if (checkInTime === 9.5) {
+                        if(hours >= 9 && hours < 11){
+                            const extraMinutes = Math.max(10 * 60 - calculateCheckInTime);
+                            const extraHours = extraMinutes / 60;
+                            const preExtension = extraHours * 60 / 30;
+                            price = prices.rest + calculateExtensionCharges(extraHours);
+                            plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部)(平日)";
+                        }
+                    }
+                    // チェックアウトが18:00を超える場合の処理
+                    else {
+                        const extraMinutes = Math.max(checkOutTime - 18 * 60); 
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        price = prices.rest + calculateExtensionCharges(extraHours);
+                        const extension = extraHours * 60 / 30;
+                        plan = "休憩(サービスタイム1部)(平日) + 延長" + extension + "本";
+                    }
+                }
+
+                // サービス＋休憩
+                else if((checkOutTime <= 23 * 60 && checkOutTime > 20.5 * 60) && hours <= 17){
+                    // チェックアウトが23時までの場合の処理
+                    if(checkInTime === 9.5 && hours >= 11 && hours <= 12.5) {
+                        const extraMinutes = Math.max(checkOutTime - 20 * 60); 
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        const extension = extraHours * 60 / 30;
+                        const preExtraMinutes = Math.max(10 * 60 - calculateCheckInTime);
+                        const preExtraHours = preExtraMinutes / 60;
+                        const preExtension = preExtraHours * 60 / 30;
+                        price = prices.rest + calculateExtensionCharges(extraHours) + calculatePreExtensionCharges(preExtraHours);
+                        plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部)(平日) + 延長 " + extension + "本";
+                    }
+                    else {
+                        price = prices.rest * 2 ;
+                        plan = "休憩(サービスタイム1部)(平日) + 休憩(5時間)";
+                    }
+                }
+                // サービス＋休憩＋延長
+                else if(((checkOutTime <= 24 * 60 && checkOutTime > 23 * 60) || checkOutTime <= 1 * 60) && hours <= 19){
+                    // 24時までにチェックアウトの場合
+                    // 8:30にチェックイン、16もしくは16.5時間滞在
+                    if (checkOutTime > 0 && checkOutTime <= 1 * 60 && checkInTime === 8.5) {
+                        const preExtraMinutes = Math.max(10 * 60 - calculateCheckInTime);
+                        const preExtraHours = preExtraMinutes / 60;
+                        const preExtension = preExtraHours * 60 / 30;
+                        price = prices.rest + prices.rest + calculatePreExtensionCharges(preExtraHours);
+                        plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部)(平日) + 休憩(5時間)";
+                    }
+                    // 9：00にチェックイン、15〜17時間滞在
+                    else if (checkOutTime >= 0 && checkOutTime <= 2 * 60 && checkInTime === 9) {
+                        // if (checkOutTime > 1 * 60 && hours <= 17) {
+                        //     const extraMinutes = Math.max(checkOutTime - 1 * 60); 
+                        //     const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        //     const extension = extraHours * 60 / 30;
+                        //     const preExtraMinutes = Math.max(10 * 60 - calculateCheckInTime);
+                        //     const preExtraHours = preExtraMinutes / 60;
+                        //     const preExtension = preExtraHours * 60 / 30;
+                        //     price = prices.rest * 2 + calculateExtensionCharges(extraHours) + calculatePreExtensionCharges(preExtraHours);
+                        //     plan = "前延長" + preExtension + "本 + 休憩(サービスタイ2部)(平日)+ 休憩(5時間) + 延長 " + extension + "本";
+                        // }
+                        // else {
+                            const preExtraMinutes = Math.max(10 * 60 - calculateCheckInTime);
+                            const preExtraHours = preExtraMinutes / 60;
+                            const preExtension = preExtraHours * 60 / 30;
+                            price = prices.rest * 2 + calculatePreExtensionCharges(preExtraHours);
+                            plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部)(平日) + 休憩(5時間)";
+                        // }
+                    }
+                    // 9：30にチェックイン、14〜16.5時間滞在
+                    else if ((checkOutTime > 23 * 60 || (checkOutTime >= 0 && checkOutTime <= 2 * 60)) && checkInTime === 9.5) {
+                        if (checkOutTime > 23 * 60 && checkOutTime <= 24 * 60) {
+                            const preExtraMinutes = Math.max(24 * 60 - checkOutTime);
+                            const preExtraHours = preExtraMinutes / 60;
+                            const preExtension = preExtraHours * 60 / 30;
+                            price = prices.rest * 2 + calculatePreExtensionCharges(preExtraHours);
+                            plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部)(平日)+ 休憩(5時間)";
+                        }
+                        // else if (checkOutTime > 1 * 60) {
+                        //     const extraMinutes = Math.max(checkOutTime - 1 * 60); 
+                        //     const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        //     const extension = extraHours * 60 / 30;
+                        //     const preExtraMinutes = Math.max(10 * 60 - calculateCheckInTime);
+                        //     const preExtraHours = preExtraMinutes / 60;
+                        //     const preExtension = preExtraHours * 60 / 30;
+                        //     price = prices.rest * 2 + calculateExtensionCharges(extraHours) + calculatePreExtensionCharges(preExtraHours);
+                        //     plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部)(平日)+ 休憩(5時間) + 延長 " + extension + "本";
+                        // }
+                        else {
+                            const preExtraMinutes = Math.max(10 * 60 - calculateCheckInTime);
+                            const preExtraHours = preExtraMinutes / 60;
+                            const preExtension = preExtraHours * 60 / 30;
+                            price = prices.rest + prices.rest + calculatePreExtensionCharges(preExtraHours);
+                            plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部)(平日) + 休憩(5時間)";
+                        }
+                    }
+                    else if (checkOutTime <= 24 * 60 && checkOutTime > 23  * 60) {
+                        const extraMinutes = Math.max(24 * 60 - checkOutTime); 
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        const extension = extraHours * 60 / 30;
+                        price = prices.rest * 2 + calculateExtensionCharges(extraHours);
+                        plan = "休憩(サービスタイム1部)(平日) + 休憩(5時間)+ 延長" + extension + "本";
+                    }
+                    else {
+                        const extraMinutes = checkOutTime + 60; 
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        const extension = extraHours * 60 / 30;
+                        price = prices.rest * 2 + calculateExtensionCharges(extraHours);
+                        plan = "休憩(サービスタイム1部)(平日) + 休憩(5時間)+ 延長" + extension + "本";
+                    }
+                }
+                // 24.5〜25.5時にチェックアウトの場合
+                else if((checkOutTime > 0 &&checkOutTime <= 2 * 60)  && hours <= 17) {
+                    if (checkOutTime > 1 * 60 && checkInTime === 9.5) {
+                        const extraMinutes = Math.max(checkOutTime - 1 * 60); 
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        const extension = extraHours * 60 / 30;
+                        const preExtraMinutes = Math.max(10 * 60 - calculateCheckInTime);
+                        const preExtraHours = preExtraMinutes / 60;
+                        const preExtension = preExtraHours * 60 / 30;
+                        price = prices.rest * 2 + calculateExtensionCharges(extraHours) + calculatePreExtensionCharges(preExtraHours);
+                        plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部)(平日)+ 休憩(5時間) + 延長 " + extension + "本";
+                    }
+                    else if(hours < 16.5){
+                        const preExtraMinutes = Math.max(10 * 60 - calculateCheckInTime);
+                        const preExtraHours = preExtraMinutes / 60;
+                        const preExtension = preExtraHours * 60 / 30;
+                        price = prices.rest + prices.rest + calculatePreExtensionCharges(preExtraHours);
+                        plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部)(平日) + 休憩(5時間)";
+                    }
+                    else {
+                        const extraMinutes = Math.max(checkOutTime - 1 * 60); 
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        const extension = extraHours * 60 / 30;
+                        const preExtraMinutes = Math.max(10 * 60 - calculateCheckInTime);
+                        const preExtraHours = preExtraMinutes / 60;
+                        const preExtension = preExtraHours * 60 / 30;
+                        price = prices.rest * 2 + calculateExtensionCharges(extraHours) + calculatePreExtensionCharges(preExtraHours);
+                        plan = "前延長" + preExtension + "本 + 休憩(サービスタイム2部)(平日)+ 休憩(5時間) + 延長 " + extension + "本";
+                    }
+                }
+                // サービス＋宿泊
+                else if (!isSaturdayOrDaysOff(date)) {
+                    if (hours <= 26){
+                        price = prices.rest + prices.stay;
+                        plan = "休憩(サービスタイム1部)(平日) + 宿泊1部(平日)";
+                    } 
+                }
+                else if (isSaturdayOrDaysOff(date)) {
+                    if (hours <= 24){
+                        price = prices.rest + prices.stay;
+                        plan = "休憩(サービスタイム1部)(平日) + 宿泊1部(土曜・祝前日・連休)";
+                    }
+                } 
+            }
+
+            // 月〜金曜 2部(10:00 - 20:00)
+            else if(checkInTime >= 10 && checkInTime < 14){
+                if(checkOutTime <= 20 * 60 && hours <= 10){
+                    price = prices.rest;
+                    plan = "休憩(サービスタイム2部)(平日)";
+                }
+                // チェックアウトが22：30を超える場合
+                else if(checkInTime <= 11) {
+                    if (checkOutTime < 23 * 60 && checkOutTime > 20 * 60 && hours < 13){
+                        const extraMinutes = Math.max(checkOutTime - 20 * 60); 
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        const extension = extraHours * 60 / 30;
+                        price = prices.rest + calculateExtensionCharges(extraHours);
+                        plan = "休憩(サービスタイム2部)(平日) + 延長" + extension + "本";
+                    }
+                    else if ((checkOutTime <= 24 * 60 && checkOutTime >= 23 * 60) || checkOutTime <= 1 * 60) {
+                        price = prices.rest * 2 ;
+                        plan = "休憩(サービスタイム2部)(平日) + 休憩(5時間)";
+                    }
+                    else if (checkOutTime > 1 * 60 && checkOutTime <= 2 * 60) {
+                        const extraMinutes = Math.max(checkOutTime - 1 * 60); 
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        const extension = extraHours * 60 / 30;
+                        price = prices.rest * 2 + calculateExtensionCharges(extraHours);
+                        plan = "休憩(サービスタイム2部)(平日) + 休憩(5時間)+ 延長" + extension + "本";
+                    }
+                    else{
+                        price = prices.rest + prices.stay;
+                        plan = "休憩(サービスタイム1部)(平日) + 宿泊1部(平日)";
+                    }
+                }
+                //前延長料金が発生する
+                //11：30にチェックイン
+                else if(checkInTime > 11 && checkInTime < 12){
+                    if(checkOutTime <= 22 * 60 && checkOutTime > 20 * 60){
+                        const extraMinutes = Math.max(checkOutTime - 20 * 60); 
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        const extension = extraHours * 60 / 30;
+                        price = prices.rest + calculateExtensionCharges(extraHours);
+                        plan = "休憩(サービスタイム2部)(平日) + 延長" + extension + "本";
+                    }
+                    else if (checkOutTime > 22 * 60 && checkOutTime <= 23 * 60) {
+                        // チェックアウトが~23:00の場合
+                        const preExtraMinutes = Math.max(14 * 60 - calculateCheckInTime);
+                        const preExtraHours = preExtraMinutes / 60;
+                        const preExtension = preExtraHours * 60 / 30;
+                        price = prices.rest + calculatePreExtensionCharges(preExtraHours);
+                        plan = "前延長" + preExtension + "本 + 休憩(サービスタイム3部)(平日)";
+                    }
+                    else if (hours < 14){
+                        price = prices.rest * 2 ;
+                        plan = "休憩(サービスタイム2部)(平日) + 休憩(5時間)";
+                    }
+                    else if(hours < 15){
+                        const extraMinutes = Math.max(checkOutTime - 1 * 60); 
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        const extension = extraHours * 60 / 30;
+                        price = prices.rest * 2 + calculateExtensionCharges(extraHours);
+                        plan = "休憩(サービスタイム2部)(平日) + 休憩(5時間)+ 延長" + extension + "本";
+                    }
+                    else {
+                        price = prices.rest + prices.stay;
+                        plan = "休憩(サービスタイム1部)(平日) + 宿泊1部(平日)";
+                    }
+                }
+                // 12時以降にチェックイン
+                else if (checkInTime >= 12 && checkInTime < 13) {
+                    if(checkInTime === 12.5 && hours === 9){
+                        const preExtraMinutes = Math.max(14 * 60 - calculateCheckInTime);
+                        const preExtraHours = preExtraMinutes / 60;
+                        const preExtension = preExtraHours * 60 / 30;
+                        price = prices.rest + calculatePreExtensionCharges(preExtraHours);
+                        plan = "前延長" + preExtension + "本 + 休憩(サービスタイム3部)(平日)";
+                    }
+                    else if (checkOutTime < 22 * 60 && checkOutTime > 20 * 60){
+                        const extraMinutes = Math.max(checkOutTime - 20 * 60); 
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        const extension = extraHours * 60 / 30;
+                        price = prices.rest + calculateExtensionCharges(extraHours);
+                        plan = "休憩(サービスタイム2部)(平日) + 延長" + extension + "本";
+                    }
+                    else if (checkOutTime <= 23 * 60 && checkOutTime >= 22 * 60) {
+                        const preExtraMinutes = Math.max(14 * 60 - calculateCheckInTime);
+                        const preExtraHours = preExtraMinutes / 60;
+                        const preExtension = preExtraHours * 60 / 30;
+                        price = prices.rest + calculatePreExtensionCharges(preExtraHours);
+                        plan = "前延長" + preExtension + "本 + 休憩(サービスタイム3部)(平日)";
+                    }
+                    else if (checkOutTime > 23 * 60 || checkOutTime <= 2 * 60){
+                        if (hours < 12) {
+                            if(checkOutTime === 0){
+                                const extraMinutes = Math.max(checkOutTime) + 60; 
+                                const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                                const extension = extraHours * 60 / 30;
+                                const preExtraMinutes = Math.max(14 * 60 - calculateCheckInTime);
+                                const preExtraHours = preExtraMinutes / 60;
+                                const preExtension = preExtraHours * 60 / 30;
+                                price = prices.rest + calculateExtensionCharges(extraHours) + calculatePreExtensionCharges(preExtraHours);
+                                plan = "前延長" + preExtension + "本 + 休憩(サービスタイム3部)(平日) + 延長 " + extension + "本";
+                            }
+                            else {
+                                const extraMinutes = Math.max(checkOutTime - 23 * 60); 
+                                const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                                const extension = extraHours * 60 / 30;
+                                const preExtraMinutes = Math.max(14 * 60 - calculateCheckInTime);
+                                const preExtraHours = preExtraMinutes / 60;
+                                const preExtension = preExtraHours * 60 / 30;
+                                price = prices.rest + calculateExtensionCharges(extraHours) + calculatePreExtensionCharges(preExtraHours);
+                                plan = "前延長" + preExtension + "本 + 休憩(サービスタイム3部)(平日) + 延長 " + extension + "本";
+                            }
+                        }
+                        else if (checkOutTime <= 1 * 60) {
+                            price = prices.rest * 2 ;
+                            plan = "休憩(サービスタイム2部)(平日) + 休憩(5時間)";
+                        }
+                        else if (checkOutTime <= 2 * 60) {
+                            const extraMinutes = Math.max(checkOutTime - 1 * 60); 
+                            const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                            const extension = extraHours * 60 / 30;
+                            price = prices.rest * 2 + calculateExtensionCharges(extraHours);
+                            plan = "休憩(サービスタイム2部)(平日) + 休憩(5時間)+ 延長" + extension + "本";
+                        }
+                    }
+                    else if (checkOutTime < 13 * 60) {
+                        if (checkOutTime <= 12 * 60){
+                            price = prices.rest + prices.stay;
+                            plan = "休憩(サービスタイム1部)(平日) + 宿泊1部(平日)";
+                        }
+                        else {
+                            const extraMinutes = Math.max(checkOutTime - 12 * 60); 
+                            const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                            const extension = extraHours * 60 / 30;
+                            price = prices.rest + prices.stay + calculateExtensionCharges(extraHours);
+                            plan = "休憩(サービスタイム1部)(平日) + 宿泊1部(平日)+ 延長" + extension + "本";
+                        }
+                    }
+                }
+                // 13時以降にチェックイン
+                else if (checkInTime >= 13 && checkInTime < 14) {
+                    if (checkOutTime < 22 * 60 && checkOutTime > 20 * 60){
+                        if (checkInTime === 13 && hours >= 8&& hours < 9) {
+                            const preExtraMinutes = Math.max(14 * 60 - calculateCheckInTime);
+                            const preExtraHours = preExtraMinutes / 60;
+                            const preExtension = preExtraHours * 60 / 30;
+                            price = prices.rest + calculatePreExtensionCharges(preExtraHours);
+                            plan = "前延長" + preExtension + "本 + 休憩(サービスタイム3部)(平日)";
+                        }
+                        else if (checkInTime === 13.5 && hours >= 7 && hours <= 12) {
+                            if(hours < 10){
+                                const preExtraMinutes = Math.max(14 * 60 - calculateCheckInTime);
+                                const preExtraHours = preExtraMinutes / 60;
+                                const preExtension = preExtraHours * 60 / 30;
+                                price = prices.rest + calculatePreExtensionCharges(preExtraHours);
+                                plan = "前延長" + preExtension + "本 + 休憩(サービスタイム3部)(平日)";
+                            }
+                            else {
+                                const extraMinutes = Math.max(checkOutTime - 23 * 60); 
+                                const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                                const extension = extraHours * 60 / 30;
+                                const preExtraMinutes = Math.max(14 * 60 - calculateCheckInTime);
+                                const preExtraHours = preExtraMinutes / 60;
+                                const preExtension = preExtraHours * 60 / 30;
+                                price = prices.rest + calculateExtensionCharges(extraHours) + calculatePreExtensionCharges(preExtraHours);
+                                plan = "前延長" + preExtension + "本 + 休憩(サービスタイム3部)(平日) + 延長 " + extension + "本";
+                            }
+                        }
+                        else {
+                            const extraMinutes = Math.max(checkOutTime - 20 * 60); 
+                            const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                            const extension = extraHours * 60 / 30;
+                            price = prices.rest + calculateExtensionCharges(extraHours);
+                            plan = "休憩(サービスタイム2部)(平日) + 延長" + extension + "本";
+                        }
+                    }
+                    else if (checkOutTime <= 23 * 60 && checkOutTime >= 22 * 60) {
+                        const preExtraMinutes = Math.max(14 * 60 - calculateCheckInTime);
+                        const preExtraHours = preExtraMinutes / 60;
+                        const preExtension = preExtraHours * 60 / 30;
+                        price = prices.rest + calculatePreExtensionCharges(preExtraHours);
+                        plan = "前延長" + preExtension + "本 + 休憩(サービスタイム3部)(平日)";
+                    }
+                    else if (checkOutTime > 23 * 60 || checkOutTime <= 2 * 60){
+                        if (hours <= 12) {
+                            if(checkOutTime > 23  * 60 && hours < 12){
+                                const extraMinutes = Math.max(checkOutTime - 23 * 60); 
+                                const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                                const extension = extraHours * 60 / 30;
+                                const preExtraMinutes = Math.max(14 * 60 - calculateCheckInTime);
+                                const preExtraHours = preExtraMinutes / 60;
+                                const preExtension = preExtraHours * 60 / 30;
+                                price = prices.rest + calculateExtensionCharges(extraHours) + calculatePreExtensionCharges(preExtraHours);
+                                plan = "前延長" + preExtension + "本 + 休憩(サービスタイム3部)(平日) + 延長 " + extension + "本";
+                            }
+                            else if (checkOutTime <= 2 * 60 && hours < 12) {
+                                const extraMinutes = Math.max(checkOutTime) + 60; 
+                                const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                                const extension = extraHours * 60 / 30;
+                                const preExtraMinutes = Math.max(14 * 60 - calculateCheckInTime);
+                                const preExtraHours = preExtraMinutes / 60;
+                                const preExtension = preExtraHours * 60 / 30;
+                                price = prices.rest + calculateExtensionCharges(extraHours) + calculatePreExtensionCharges(preExtraHours);
+                                plan = "前延長" + preExtension + "本 + 休憩(サービスタイム3部)(平日) + 延長 " + extension + "本";
+                            }
+                            else if (checkOutTime > 1 * 60 && checkOutTime < 2 * 60 && hours <= 12){
+                                const extraMinutes = Math.max(checkOutTime) + 60; 
+                                const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                                const extension = extraHours * 60 / 30;
+                                const preExtraMinutes = Math.max(14 * 60 - calculateCheckInTime);
+                                const preExtraHours = preExtraMinutes / 60;
+                                const preExtension = preExtraHours * 60 / 30;
+                                price = prices.rest + calculateExtensionCharges(extraHours) + calculatePreExtensionCharges(preExtraHours);
+                                plan = "前延長" + preExtension + "本 + 休憩(サービスタイム3部)(平日) + 延長 " + extension + "本";
+                            }
+                            else {
+                                price = prices.rest * 2 ;
+                                plan = "休憩(サービスタイム2部)(平日) + 休憩(5時間)";
+                            }
+                        }
+                        else if (checkOutTime <= 1 * 60) {
+                            price = prices.rest * 2 ;
+                            plan = "休憩(サービスタイム2部)(平日) + 休憩(5時間)";
+                        }
+                        else {
+                            if(checkInTime === 13.5 && hours === 12.5){
+                                const preExtraMinutes = Math.max(14 * 60 - calculateCheckInTime);
+                                const preExtraHours = preExtraMinutes / 60;
+                                const preExtension = preExtraHours * 60 / 30;
+                                price = prices.rest + prices.rest + calculatePreExtensionCharges(preExtraHours);
+                                plan = "前延長" + preExtension + "本 + 休憩(サービスタイム3部)(平日) + 休憩(5時間)";
+                            }
+                            else {
+                                const extraMinutes = Math.max(checkOutTime - 1 * 60); 
+                            const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                            const extension = extraHours * 60 / 30;
+                            price = prices.rest * 2 + calculateExtensionCharges(extraHours);
+                            plan = "休憩(サービスタイム2部)(平日) + 休憩(5時間)+ 延長" + extension + "本";
+                            }
+                        }
+                    }
+                    else if (checkOutTime < 14 * 60) {
+                        if (checkOutTime <= 12 * 60){
+                            price = prices.rest + prices.stay;
+                            plan = "休憩(5時間)(平日) + 宿泊1部(平日)";
+                        }
+                        else {
+                            const extraMinutes = Math.max(checkOutTime - 12 * 60); 
+                            const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                            const extension = extraHours * 60 / 30;
+                            price = prices.rest + prices.stay + calculateExtensionCharges(extraHours);
+                            plan = "休憩(5時間)(平日) + 宿泊1部(平日)+ 延長" + extension + "本";
+                        }
+                    }
+                }
+            }
+
+            // 月〜金曜 3部(14:00 - 23:00)
+            else if((checkInTime >= 14 && checkInTime < 18)){
+                if((checkOutTime <= 23 * 60 && checkOutTime > 14 * 60) && hours <= 9){
+                    price = prices.rest;
+                    plan = "休憩(サービスタイム3部)(平日)";
+                }
+                // 15時までにチェックイン
+                // 完成
+                else if (checkInTime <= 15){
+                    // 24時までに退室の場合
+                    if(checkOutTime > 23 * 60 && hours < 12){
+                        const extraMinutes = Math.max(0, checkOutTime - 23 * 60); // 延長時間(分単位)
+                        const extraHours = Math.ceil(extraMinutes / 30) * 0.5; // 30分単位で計算
+                        // 延長料金を計算して追加
+                        price = prices.rest + calculateExtensionCharges(extraHours);
+                        const extension = extraHours * 60 / 30;
+                        plan = "休憩(サービスタイム3部)(平日) + 延長" + extension + "本";
+                    }
+                    // 24時を過ぎて24時30分になるまでに退室の場合
+                    else if(checkOutTime < 2 * 60  && hours < 12){
+                        const extraMinutes = Math.max(checkOutTime + 60); 
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        const extension = extraHours * 60 / 30;
+                        price = prices.rest + calculateExtensionCharges(extraHours);
+                        plan = "休憩(サービスタイム3部)(平日)+ 延長" + extension + "本";
+                    }
+                    else if (checkOutTime < 2.5 * 60) {
+                        price = prices.rest * 2;
+                        plan = "休憩(サービスタイム3部)(平日)+ 休憩(5時間)";
+                    }
+                    else if (checkOutTime <= 14 * 60) {
+                        price = prices.rest + prices.stay;
+                        plan = "休憩(サービスタイム3部)(平日)+ 宿泊2部(平日)";
+                    }
+                    else {
+                        const extraMinutes = Math.max(checkOutTime - 14 * 60); 
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        const extension = extraHours * 60 / 30;
+                        price = prices.rest + prices.stay + calculateExtensionCharges(extraHours);
+                        plan = "休憩(サービスタイム3部)(平日) + 宿泊2部(平日)+ 延長" + extension + "本";
+                    }
+                }
+                // 18時までにチェックイン
+                else if(checkInTime < 18 && checkInTime > 15) {
+                // サービス＋休憩(2時までにチェックアウトの場合)
+                    if((checkOutTime >= 23 * 60|| checkOutTime <= 2 * 60) && hours < 11){
+                        if(checkOutTime >= 23 * 60) {
+                            const extraMinutes = Math.max(checkOutTime - 23 * 60); 
+                            const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                            const extension = extraHours * 60 / 30;
+                            price = prices.rest + calculateExtensionCharges(extraHours);
+                            plan = "休憩(サービスタイム3部)(平日) + 延長" + extension + "本";
+                        }
+                        else if (checkOutTime <= 2 * 60 && hours < 10){
+                            if(checkInTime === 16.5 && hours === 9.5){
+                                price = prices.rest * 2 ;
+                                plan = "休憩(サービスタイム3部)(平日) + 休憩(5時間)";
+                            }
+                            else if (checkInTime === 17 && hours === 9) {
+                                price = prices.rest * 2 ;
+                                plan = "休憩(サービスタイム3部)(平日) + 休憩(5時間)";
+                            }
+                            else if (checkInTime === 17.5 && hours === 8.5) {
+                                const extraMinutes = Math.max(18 * 60 - calculateCheckInTime);
+                                const extraHours = extraMinutes / 60;
+                                const preExtension = extraHours * 60 / 30;
+                                price = prices.stay + calculateExtensionCharges(extraHours);
+                                plan = "前延長" + preExtension + "本 + 宿泊1部(平日)";
+                            }
+                            else {
+                                const extraMinutes = Math.max(1 * 60 + checkOutTime); 
+                                const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                                const extension = extraHours * 60 / 30;
+                                price = prices.rest + calculateExtensionCharges(extraHours);
+                                plan = "休憩(サービスタイム3部)(平日) + 延長" + extension + "本";
+                            }
+                        }
+                        else if(checkInTime === 15.5 && hours === 10){
+                            const extraMinutes = Math.max(1 * 60 + checkOutTime); 
+                            const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                            const extension = extraHours * 60 / 30;
+                            price = prices.rest + calculateExtensionCharges(extraHours);
+                            plan = "休憩(サービスタイム3部)(平日) + 延長" + extension + "本";
+                        }
+                        else {
+                            price = prices.rest * 2 ;
+                            plan = "休憩(サービスタイム3部)(平日) + 休憩(5時間)";
+                        } 
+                    }
+                    else if(checkOutTime > 2 * 60 && checkOutTime <= 16 * 60 && hours < 21){
+                        if (checkOutTime > 12 * 60 && checkOutTime <= 14 * 60) {
+                            if(checkInTime >= 16 && checkInTime < 18){
+                                const extraMinutes = Math.max(checkOutTime - 12 * 60); 
+                                const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                                const extension = extraHours * 60 / 30;
+                                const preExtraMinutes = Math.max(18 * 60 - calculateCheckInTime);
+                                const preExtraHours = preExtraMinutes / 60;
+                                const preExtension = preExtraHours * 60 / 30;
+                                price = prices.stay + calculateExtensionCharges(extraHours) + calculatePreExtensionCharges(preExtraHours);
+                                plan = "前延長" + preExtension + "本 + 宿泊1部(平日) + 延長 " + extension + "本";
+                            }
+                        }
+                        else {
+                            const extraMinutes = Math.max(18 * 60 - calculateCheckInTime);
+                            const extraHours = extraMinutes / 60;
+                            const preExtension = extraHours * 60 / 30;
+                            price = prices.stay + calculateExtensionCharges(extraHours);
+                            plan = "前延長" + preExtension + "本 + 宿泊1部(平日)";
+                        }
+                    }
+                    else if (checkOutTime < 15 * 60) {
+                        const extraMinutes = Math.max(checkOutTime - 12 * 60); 
+                        const extraHours = extraMinutes / 60; // 延長時間を時間単位で計算
+                        const extension = extraHours * 60 / 30;
+                        const preExtraMinutes = Math.max(18 * 60 - calculateCheckInTime);
+                        const preExtraHours = preExtraMinutes / 60;
+                        const preExtension = preExtraHours * 60 / 30;
+                        price = prices.stay + calculateExtensionCharges(extraHours) + calculatePreExtensionCharges(preExtraHours);
+                        plan = "前延長" + preExtension + "本 + 宿泊1部(平日) + 延長 " + extension + "本";
+                    }
+                    else {
+                        const extraMinutes = Math.max(18 * 60 - calculateCheckInTime);
+                        const extraHours = extraMinutes / 60;
+                        const preExtension = extraHours * 60 / 30;
+                        price = prices.rest + prices.stay + calculateExtensionCharges(extraHours);
+                        plan = "前延長" + preExtension + "本 + 宿泊1部(平日) + 休憩(サービスタイム2部)";
+                    }
+                }
+            }
+        }
+    }
+    return {price, plan};
+}
+
+
+
+
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = { calculatePriceByRank, RANK_PRICES };
+}
+if (typeof window !== "undefined") {
+  window.priceEngine = { calculatePriceByRank, RANK_PRICES };
+}
+
+})();
+
+/* ---- src/pmsEngine.js ---- */
+(function () {
+//////////////////////////////////////////////////////
+// ホテルジュン 料金シミュレーター（実機フロンティアNEOの決め方を再現する版）
+//
+//  quote(rank, checkInDate, hours) → { price, plan, breakdown, segments }
+//
+//  考え方（2026-11 実機写真131枚＋2025-10祝日写真で確認した挙動）:
+//   - 料金は「商品（ショート/休憩/サービスタイム/深夜休憩/深夜保証/宿泊1部/宿泊2部）」と
+//     「延長(30分)」の組み合わせ。合計が最小になる組み合わせを選ぶ。
+//   - 各商品の時間枠は、その商品が始まる時刻が属する「営業日」(5:55区切り)の
+//     曜日区分(A〜D)で決まる。日をまたぐと、翌営業日の枠で計算される。
+//   - 商品の終わりには5分の猶予がつく（例: 18:00終了の枠 → 18:05まで）。
+//   - 休憩・ショート・サービスタイムと、その後の延長は 翌2:05 までしか使えない。
+//     それ以降は宿泊系（宿泊/深夜保証）でカバーする。
+//   - 前延長（商品の開始時刻まで延長でつなぐ）は、開始時刻が決まっている
+//     サービスタイム2部・3部、宿泊1部・2部に対してだけ使える。
+//   - 深夜休憩は延長できない（3時間を超えると宿泊系）。
+//
+//  依存: dayPattern (→ jpHolidays)
+//////////////////////////////////////////////////////
+'use strict';
+
+const dayPattern = (typeof require !== 'undefined') ? require('./dayPattern') : window.dayPattern;
+
+// ランク別料金（税込・室料）。docs/料金シミュレーション仕様書.md §4-1
+const RANK_PRICES = {
+  A: { short: 6000, rest: 7800, midnight_rest: 8800, stay: 13800, ext: 1400 },
+  B: { short: 5800, rest: 7200, midnight_rest: 8200, stay: 12800, ext: 1300 },
+  C: { short: 5800, rest: 6980, midnight_rest: 7980, stay: 12800, ext: 1300 },
+  D: { short: 5700, rest: 6980, midnight_rest: 7980, stay: 11800, ext: 1300 },
+  E: { short: 5600, rest: 6980, midnight_rest: 7980, stay: 12800, ext: 1300 },
+  F: { short: 5600, rest: 6700, midnight_rest: 7800, stay: 11200, ext: 1100 },
+  G: { short: 4980, rest: 5980, midnight_rest: 6980, stay: 10800, ext: 1100 },
+  H: { short: 4980, rest: 5980, midnight_rest: 6980, stay: 9980, ext: 1100 },
+  I: { short: 4980, rest: 5680, midnight_rest: 6800, stay: 8980, ext: 1000 },
+};
+
+const H = 60;
+const BIZ = 5 * H + 55;   // 営業日の切替 5:55
+const GRACE = 5;          // 商品終了後の猶予(分)
+const DAY_END = 26 * H;   // 休憩系の最終 翌2:00
+const NIGHT_END = 30 * H; // 翌6:00
+
+// 曜日区分ごとの時間枠（営業日の暦日0:00からの分。翌日は+24h）。時間帯パターン.jpg
+const WINDOWS = {
+  A: { svc: [[6, 18], [10, 20], [14, 23]], restLen: 5, stay1: [18, 12], stay2: [22, 14], guarantee: 12 },
+  B: { svc: [[6, 18], [10, 20], [14, 23]], restLen: 5, stay1: [19, 10], stay2: [22, 12], guarantee: 10 },
+  C: { svc: [[6, 16], [10, 19], [14, 22]], restLen: 4, stay1: [19, 10], stay2: [22, 12], guarantee: 10 },
+  D: { svc: [[6, 16], [10, 19], [14, 22]], restLen: 4, stay1: [18, 12], stay2: [22, 14], guarantee: 12 },
+};
+
+const LABEL = { short: 'ショート', rest: '休憩', mrest: '深夜休憩', mstay: '深夜保証',
+  svc1: 'サービスタイム1部', svc2: 'サービスタイム2部', svc3: 'サービスタイム3部',
+  stay1: '宿泊1部', stay2: '宿泊2部' };
+
+function addDays(date, n) { const x = new Date(date); x.setDate(x.getDate() + n); return x; }
+function fmt(min) { const d = Math.floor(min / 1440), m = ((min % 1440) + 1440) % 1440;
+  return `${d > 0 ? '翌' + (d > 1 ? d : '') : ''}${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}`; }
+
+function quote(rank, checkIn, hours) {
+  const R = RANK_PRICES[rank];
+  if (!R) throw new Error('unknown rank: ' + rank);
+  const day0 = new Date(checkIn.getFullYear(), checkIn.getMonth(), checkIn.getDate());
+  const IN = checkIn.getHours() * H + checkIn.getMinutes(); // 入室日の0:00からの分
+  const OUT = IN + Math.round(hours * H);
+
+  const codeCache = {};
+  const codeOf = k => (codeCache[k] = codeCache[k] || dayPattern.getDayPattern(addDays(day0, k)).code);
+  const bizIndex = T => Math.floor((T - BIZ) / 1440);
+  const ext = n => n * R.ext;
+  const nExt = mins => Math.max(0, Math.ceil(mins / 30));
+
+  // 時刻tに「直接」始められる商品の一覧 {kind, price, end, daytime, cap, tail, chain}
+  function startable(t, first, dayOnly) {
+    const k = bizIndex(t), c = codeOf(k), W = WINDOWS[c], base = k * 1440, sc = t - base;
+    const cap = base + DAY_END + GRACE;
+    const out = [];
+    if (first && sc >= 6 * H && sc < DAY_END)
+      out.push({ kind: 'short', price: R.short, end: base + Math.min(sc + 90, DAY_END) + GRACE, daytime: true, cap, tail: true, chain: true, code: c });
+    if (sc >= 6 * H && sc < DAY_END)
+      out.push({ kind: 'rest', price: R.rest, end: base + Math.min(sc + W.restLen * H, DAY_END) + GRACE, daytime: true, cap, tail: true, chain: true, code: c });
+    W.svc.forEach(([s, e], i) => {
+      if (sc >= s * H && sc < e * H)
+        out.push({ kind: 'svc' + (i + 1), price: R.rest, end: base + e * H + GRACE, daytime: true, cap, tail: true, chain: true, code: c });
+    });
+    if (dayOnly) return out;
+    if (first && sc >= 23 * H && sc < NIGHT_END)
+      out.push({ kind: 'mrest', price: R.midnight_rest, end: t + 3 * H + GRACE, daytime: false, tail: false, chain: false, code: c });
+    if (first && sc >= 24 * H && sc < NIGHT_END)
+      out.push({ kind: 'mstay', price: R.stay, end: t + W.guarantee * H + GRACE, daytime: false, tail: true, chain: true, code: c });
+    if (sc >= W.stay1[0] * H && sc < NIGHT_END)
+      out.push({ kind: 'stay1', price: R.stay, end: base + (24 + W.stay1[1]) * H + GRACE, daytime: false, tail: true, chain: true, code: c });
+    if (sc >= W.stay2[0] * H && sc < NIGHT_END)
+      out.push({ kind: 'stay2', price: R.stay, end: base + (24 + W.stay2[1]) * H + GRACE, daytime: false, tail: true, chain: true, code: c });
+    return out;
+  }
+
+  // 前延長でつなげる先（開始時刻が決まっている商品）: [kind, 開始時刻(絶対分)]
+  function preTargets(t, first) {
+    const res = [];
+    const k0 = bizIndex(t);
+    for (const k of [k0, k0 + 1]) {
+      const c = codeOf(k), W = WINDOWS[c], base = k * 1440;
+      const cand = [['svc2', W.svc[1][0]], ['svc3', W.svc[2][0]], ['stay1', W.stay1[0]], ['stay2', W.stay2[0]]];
+      for (const [kind, s] of cand) {
+        const S = base + s * H;
+        if (S <= t || S >= OUT) continue;
+        // 平日(A)は、入室直後の前延長で宿泊1部へ入る使い方をしない（実機 2026/9/9 15:30IN 11h）
+        if (first && kind === 'stay1' && c === 'A') continue;
+        res.push([kind, S]);
+      }
+    }
+    return res;
+  }
+
+  const memo = new Map();
+  // tからOUTまでを覆う最小コスト。返り値 {cost, segs}
+  function best(t, first, dayOnly) {
+    const key = t + ':' + (first ? 1 : 0) + (dayOnly ? 'd' : '');
+    if (memo.has(key)) return memo.get(key);
+    let bestRes = { cost: Infinity, segs: null };
+    const consider = (cost, segs) => { if (cost < bestRes.cost) bestRes = { cost, segs }; };
+
+    const tryBlock = (b, startT, prefixCost, prefixSegs, dOnly) => {
+      const seg = { item: LABEL[b.kind], kind: b.kind, from: startT, to: b.end, price: b.price, code: b.code };
+      if (b.end >= OUT) { consider(prefixCost + b.price, [...prefixSegs, seg]); return; }
+      // 後延長でOUTまで
+      if (b.tail && (!b.daytime || OUT <= b.cap)) {
+        const n = nExt(OUT - b.end);
+        consider(prefixCost + b.price + ext(n), [...prefixSegs, seg, { item: '延長', kind: 'ext', qty: n, from: b.end, to: b.end + n * 30, price: ext(n) }]);
+      }
+      // 次の商品へつなぐ
+      if (b.chain && (!b.daytime || b.end <= b.cap)) {
+        const r = best(b.end, false, dOnly);
+        if (r.segs) consider(prefixCost + b.price + r.cost, [...prefixSegs, seg, ...r.segs]);
+      }
+    };
+
+    // 日・祝(D)で15:30〜18:00に入室し、翌2:05を超えて泊まる場合は、
+    // 実機は必ず「前延長→宿泊1部」を使う（2025/10/13 15:30〜17:00INの写真。安い別ルートがあっても）
+    const k = bizIndex(t), sc = t - k * 1440;
+    const forceStay1 = first && !dayOnly && codeOf(k) === 'D' && sc >= 15 * H + 30 && sc < 18 * H
+      && OUT > k * 1440 + DAY_END + GRACE;
+    if (!forceStay1) for (const b of startable(t, first, dayOnly)) tryBlock(b, t, 0, [], dayOnly);
+    for (const [kind, S] of preTargets(t, first)) {
+      if (dayOnly && kind.startsWith('stay')) continue;
+      if (forceStay1 && kind !== 'stay1') continue;
+      const n = nExt(S - t);
+      const b = startable(S, false, false).find(x => x.kind === kind);
+      if (!b) continue;
+      // サービスタイム3部への前延長は、その日のうちに帰る（宿泊を含まない）場合だけ使われる
+      // （実機: 2025/10/13 13:30IN 11.5h は使う／23h以上は使わない、2026/9/12 12:30IN 24h も使わない）
+      const dOnly = dayOnly || kind === 'svc3';
+      tryBlock(b, S, ext(n), [{ item: first ? '前延長' : '延長', kind: 'ext', qty: n, from: t, to: S, price: ext(n) }], dOnly);
+    }
+    memo.set(key, bestRes);
+    return bestRes;
+  }
+
+  const r = best(IN, true, false);
+  if (!r.segs) return { price: null, plan: '計算できません', breakdown: [], segments: [] };
+  const breakdown = r.segs.map(s => ({ item: s.kind === 'ext' ? `${s.item}(30分)` : s.item,
+    unit: s.kind === 'ext' ? R.ext : s.price, qty: s.kind === 'ext' ? s.qty : 1, subtotal: s.price,
+    from: fmt(s.from), to: fmt(s.to), mode: s.code }));
+  const plan = r.segs.map(s => s.kind === 'ext' ? `${s.item}${s.qty}本` : s.item).join(' + ');
+  return { price: r.cost, plan, breakdown, segments: r.segs };
+}
+
+const api = { quote, RANK_PRICES, WINDOWS };
+if (typeof module !== 'undefined' && module.exports) module.exports = api;
+if (typeof window !== 'undefined') window.pmsEngine = api;
+
+})();
+
+/* ---- src/simulator.js ---- */
+(function () {
+//////////////////////////////////////////////////////
+// ホテルジュン 料金シミュレーター（日付対応・既存ロジック委譲版）
+//
+//  simulate(rank, checkInDate, hours) で、実際の日時から料金を計算する。
+//   - 営業日は毎日5:55切り替え。実チェックイン時刻から「その営業日」の
+//     曜日区分(A〜D)を1つだけ決定し、既存ロジック(priceEngine.calculatePriceByRank)に
+//     そのまま委譲する（＝calculatePrice_Aを100%再現。旧サイトの実装方針と同じ）。
+//   - 24時間を超えて日付をまたぐ場合も、区分の切り替えは行わない。
+//     既存コードの「延長は日を跨いでも同じ区分の窓を使い続ける」という挙動を
+//     そのまま踏襲する（実機フロンティアNEOの料金シミュレーションで実測・確認済み）。
+//   - 旧バージョン(DPによる全構成探索・最安選択)は、"前延長で本来入れる枠を
+//     飛び越して後の枠に入り、既存より安い組み合わせを作る" というケースを
+//     見つけてしまい、既存/実機と食い違うことが判明したため廃止した。
+//     （該当ケースは docs/既存が割高_一覧.csv に記録済み）
+//
+//  依存: dayPattern (→ jpHolidays), priceEngine
+//////////////////////////////////////////////////////
+'use strict';
+
+const dayPattern = (typeof require !== 'undefined') ? require('./dayPattern') : window.dayPattern;
+const priceEngineMod = (typeof require !== 'undefined') ? require('./priceEngine') : window.priceEngine;
+const { calculatePriceByRank, RANK_PRICES } = priceEngineMod;
+const pmsEngine = (typeof require !== 'undefined') ? require('./pmsEngine') : window.pmsEngine;
+
+const H = 60;
+const BIZ_START_MIN = 5 * H + 55; // 営業日切替 5:55
+
+// 曜日区分コード(A〜D) → 既存コール規約のフラグ（test/regression.js の stubs() と同じ対応）
+const CODE_TO_FLAGS = {
+  A: { isSaturdayOrDaysOff: false, isWeekendOrHoliday: false }, // 平日
+  B: { isSaturdayOrDaysOff: true, isWeekendOrHoliday: false },  // 祝前平日
+  C: { isSaturdayOrDaysOff: true, isWeekendOrHoliday: true },   // 土・祝前祝日
+  D: { isSaturdayOrDaysOff: false, isWeekendOrHoliday: true },  // 日・祝
+};
+
+function addDays(date, n) { const x = new Date(date); x.setDate(x.getDate() + n); return x; }
+
+// 既存ロジックが返す plan 文字列（自由形式のテンプレート）を解析し、
+// 明細(breakdown)配列を復元する。解析結果の合計が price と一致しない場合は
+// 1行フォールバックにする（表示は簡略化されるが金額は必ずエンジンの値を正とする）。
+function parseBreakdown(plan, priceTable, mode) {
+  const items = [];
+  const re = /宿泊深夜保証(\d+)時間|宿泊(\d)部|休憩\(サービスタイム(\d)部\)|休憩\(([\d.]+)時間\)|ショート|深夜休憩|深夜保証|(前)?延長\s*([\d.]+)\s*本/g;
+  let m;
+  while ((m = re.exec(plan)) !== null) {
+    if (m[1]) items.push({ item: `宿泊深夜保証${m[1]}時間`, unit: priceTable.stay, qty: 1, subtotal: priceTable.stay, mode });
+    else if (m[2]) items.push({ item: `宿泊${m[2]}部`, unit: priceTable.stay, qty: 1, subtotal: priceTable.stay, mode });
+    else if (m[3]) items.push({ item: `サービスタイム${m[3]}部`, unit: priceTable.rest, qty: 1, subtotal: priceTable.rest, mode });
+    else if (m[4]) items.push({ item: '休憩', unit: priceTable.rest, qty: 1, subtotal: priceTable.rest, mode });
+    else if (m[0] === 'ショート') items.push({ item: 'ショート', unit: priceTable.short, qty: 1, subtotal: priceTable.short, mode });
+    else if (m[0] === '深夜休憩') items.push({ item: '深夜休憩', unit: priceTable.midnight_rest, qty: 1, subtotal: priceTable.midnight_rest, mode });
+    else if (m[0] === '深夜保証') items.push({ item: '深夜保証', unit: priceTable.stay, qty: 1, subtotal: priceTable.stay, mode });
+    else if (m[6] !== undefined) {
+      const isPre = !!m[5];
+      const qty = parseFloat(m[6]);
+      items.push({ item: (isPre ? '前延長' : '延長') + '(30分)', unit: priceTable.ext, qty, subtotal: priceTable.ext * qty, mode });
+    }
+  }
+  return items;
+}
+
+function cleanPlanLabel(breakdown) {
+  return breakdown.map((b) => {
+    if (/延長/.test(b.item)) return `${b.item.replace('(30分)', '')}${b.qty}本`;
+    return b.item;
+  }).join(' + ');
+}
+
+/**
+ * @param {'A'|'B'|'C'|'D'|'E'|'F'|'G'|'H'|'I'} rank
+ * @param {Date} checkInDate 実日時
+ * @param {number} hours 利用時間(30分刻み、上限24h)
+ * @returns {{price:number|null, plan:string, breakdown:Array, dayPattern:{code:string,service:string,stayGuarantee:number}}}
+ */
+// 2026-11-21〜 本番の計算は pmsEngine（実機の決め方を再現する版）で行う。
+// 実機写真131枚＋2025年祝日写真35件と全件一致（test/jikki_test.js）。
+function simulate(rank, checkInDate, hours) {
+  const clockMin = checkInDate.getHours() * H + checkInDate.getMinutes();
+  const businessDate = clockMin < BIZ_START_MIN
+    ? addDays(new Date(checkInDate.getFullYear(), checkInDate.getMonth(), checkInDate.getDate()), -1)
+    : new Date(checkInDate.getFullYear(), checkInDate.getMonth(), checkInDate.getDate());
+  const pat = dayPattern.getDayPattern(businessDate);
+  const r = pmsEngine.quote(rank, checkInDate, hours);
+  if (r.price == null) return { price: null, plan: '(該当プランなし)', breakdown: [], dayPattern: pat };
+  return { price: r.price, plan: r.plan, breakdown: r.breakdown, dayPattern: pat };
+}
+
+// 旧ロジック（旧サイトの分岐をそのまま関数化したもの）。比較・調査用に残す。
+function simulateLegacy(rank, checkInDate, hours) {
+  const priceTable = RANK_PRICES[rank];
+  if (!priceTable) throw new Error('unknown rank: ' + rank);
+
+  const clockMin = checkInDate.getHours() * H + checkInDate.getMinutes();
+  // 5:55境界: 当日5:55より前は「前営業日」として扱う
+  const businessDate = clockMin < BIZ_START_MIN
+    ? addDays(new Date(checkInDate.getFullYear(), checkInDate.getMonth(), checkInDate.getDate()), -1)
+    : new Date(checkInDate.getFullYear(), checkInDate.getMonth(), checkInDate.getDate());
+
+  const pat = dayPattern.getDayPattern(businessDate);
+  const flags = CODE_TO_FLAGS[pat.code];
+
+  const checkInTime = clockMin / H; // 0〜23.99...（既存コール規約）
+  const checkOutTime = ((checkInTime + hours) % 24) * H;
+  const calculateCheckInTime = checkInTime * H;
+
+  const result = calculatePriceByRank(
+    rank, businessDate, hours, checkInTime, checkOutTime, calculateCheckInTime,
+    () => flags.isSaturdayOrDaysOff, () => flags.isWeekendOrHoliday
+  );
+
+  if (!result || result.price == null || !(result.price > 0)) {
+    return { price: null, plan: '(該当プランなし)', breakdown: [], dayPattern: pat };
+  }
+
+  const breakdown = parseBreakdown(result.plan, priceTable, pat.code);
+  const sum = breakdown.reduce((a, b) => a + b.subtotal, 0);
+  if (breakdown.length === 0 || sum !== result.price) {
+    // 解析に失敗した場合のフォールバック（金額はエンジンの値を正とする）
+    return {
+      price: result.price,
+      plan: result.plan,
+      breakdown: [{ item: result.plan, unit: result.price, qty: 1, subtotal: result.price, mode: pat.code }],
+      dayPattern: pat,
+    };
+  }
+
+  return { price: result.price, plan: cleanPlanLabel(breakdown), breakdown, dayPattern: pat };
+}
+
+/**
+ * 営業日＋24時間超え表記の時刻で計算する（UI等からの入力用）。
+ *  - businessDate: その営業日の暦日（年月日。時刻は無視）
+ *  - startClock: 入室時刻(時)。6:00〜29.916(翌5:55) の24時間超え表記。例 24=翌0:00, 26=翌2:00
+ *  - hours: 利用時間
+ */
+function simulateByBusinessDay(rank, businessDate, startClock, hours) {
+  const base = new Date(businessDate.getFullYear(), businessDate.getMonth(), businessDate.getDate(), 0, 0, 0, 0);
+  const actual = new Date(base.getTime() + Math.round(startClock * 60) * 60000);
+  return simulate(rank, actual, hours);
+}
+
+const api = { simulate, simulateLegacy, simulateByBusinessDay, RANK_PRICES };
+if (typeof module !== 'undefined' && module.exports) module.exports = api;
+if (typeof window !== 'undefined') window.hoteljunSimulator = api;
+
+})();
+</script>
+<script>
+/* ===== UI ===== */
+const CODE_NAME = { A: '平日', B: '祝前平日', C: '土・祝前祝日', D: '日・祝' };
+const RANK_PRICES = window.hoteljunSimulator.RANK_PRICES;
+
+function fmtClock(v){ const h=Math.floor(v), m=v%1?'30':'00';
+  if(v<24){ return ('0'+h).slice(-2)+':'+m; }
+  return h+':'+m+'（翌'+('0'+(h-24)).slice(-2)+':'+m+'）'; }
+const timeSel=document.getElementById('time');
+for(let v=6;v<=29.5;v+=0.5){ const o=document.createElement('option'); o.value=v; o.textContent=fmtClock(v); if(v===18)o.selected=true; timeSel.appendChild(o); }
+const rankSel=document.getElementById('rank');
+for(const r of Object.keys(RANK_PRICES)){ const o=document.createElement('option'); o.value=r; o.textContent='ランク'+r; rankSel.appendChild(o); }
+const hoursSel=document.getElementById('hours');
+for(let v=0.5;v<=24;v+=0.5){ const o=document.createElement('option'); o.value=v; o.textContent=v+'時間'; if(v===14)o.selected=true; hoursSel.appendChild(o); }
+document.getElementById('date').value='2026-06-07';
+
+const DOW=['日','月','火','水','木','金','土'];
+
+document.getElementById('go').addEventListener('click',()=>{
+  const ds=document.getElementById('date').value; if(!ds){ alert('日付を選んでください'); return; }
+  const [y,mo,d]=ds.split('-').map(Number); const bdate=new Date(y,mo-1,d);
+  const sc=parseFloat(timeSel.value), rank=rankSel.value, hours=parseFloat(hoursSel.value);
+  const r=window.hoteljunSimulator.simulateByBusinessDay(rank,bdate,sc,hours);
+  const pat = r.dayPattern || window.dayPattern.getDayPattern(bdate);
+
+  document.getElementById('applied').textContent=
+    '適用: '+y+'/'+mo+'/'+d+'('+DOW[bdate.getDay()]+')'+(window.jpHolidays.isHolidayJP(bdate)?'・祝':'')+' → 区分'+pat.code+'（'+CODE_NAME[pat.code]+'） / サービス'+(pat.service==='weekday'?'平日(長)':'土日祝(短)')+' / 宿泊'+pat.stayGuarantee+'時間保証';
+
+  const warnEl = document.getElementById('warn');
+  if (r.price == null) {
+    warnEl.style.display = 'block';
+    warnEl.textContent = '※ この入室時刻・利用時間の組み合わせは、既存ロジック上うまく計算できないケースです（早朝チェックイン＋長時間利用の一部で発生する既知の課題）。時刻・時間を調整するか、担当者にご確認ください。';
+  } else {
+    warnEl.style.display = 'none';
+  }
+
+  document.getElementById('price').textContent='¥'+(r.price!=null?r.price.toLocaleString():'-');
+  document.getElementById('plan').textContent=r.plan;
+  const tb=document.querySelector('#bd tbody'); tb.innerHTML='';
+  for(const b of r.breakdown){ const tr=document.createElement('tr');
+    tr.innerHTML='<td>'+b.item+(b.mode?'<span class="mode">'+b.mode+'モード</span>':'')+'</td><td class="num">¥'+b.unit.toLocaleString()+'</td><td class="num">'+b.qty+'</td><td class="num">¥'+b.subtotal.toLocaleString()+'</td>'; tb.appendChild(tr); }
+  document.getElementById('result').style.display='block';
+  document.getElementById('bdwrap').style.display=r.breakdown.length?'block':'none';
+});
+</script>
+</body>
+</html>
