@@ -2522,7 +2522,25 @@ function quote(rank, checkIn, hours) {
     const key = t + ':' + (first ? 1 : 0) + (dayOnly ? 'd' : '');
     if (memo.has(key)) return memo.get(key);
     let bestRes = { cost: Infinity, segs: null };
-    const consider = (cost, segs) => { if (cost < bestRes.cost) bestRes = { cost, segs }; };
+    // 同じ金額の組み合わせが複数あるときの選び方（実機の表示に合わせる）:
+    //  1) 最後の商品・延長がより遅い時刻まで覆う組み合わせ
+    //  2) それでも同じで商品が2つ以上なら、最初の商品が早く終わる組み合わせ（例: 深夜保証より宿泊2部→次の商品）
+    const coverEnd = segs => segs[segs.length - 1].to;
+    const firstEnd = segs => { const b = segs.filter(x => x.kind !== 'ext'); return b.length > 1 ? b[0].to : 0; };
+    const consider = (cost, segs) => {
+      if (cost < bestRes.cost) { bestRes = { cost, segs }; return; }
+      if (cost > bestRes.cost) return;
+      const a = coverEnd(segs), b = coverEnd(bestRes.segs);
+      if (a !== b) { if (a > b) bestRes = { cost, segs }; return; }
+      //  2') 昼の商品から始まる場合（または途中の商品）は、途中の宿泊が「宿泊2部」になる組み合わせを優先（実機 15:30IN 23.5h）
+      const dayFirst = x => ['short', 'rest', 'svc1', 'svc2', 'svc3'].includes(x.find(y => y.kind !== 'ext').kind);
+      const has2 = x => x.some((y, i) => y.kind === 'stay2' && (i === 0 || x[i - 1].kind !== 'ext')); // 延長でつないだ2部は除く
+      if ((!first || (dayFirst(segs) && dayFirst(bestRes.segs))) && has2(segs) !== has2(bestRes.segs)) {
+        if (has2(segs)) bestRes = { cost, segs };
+        return;
+      }
+      if (firstEnd(segs) < firstEnd(bestRes.segs)) bestRes = { cost, segs };
+    };
 
     const tryBlock = (b, startT, prefixCost, prefixSegs, dOnly) => {
       const seg = { item: LABEL[b.kind], kind: b.kind, from: startT, to: b.end, price: b.price, code: b.code };
